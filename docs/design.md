@@ -128,15 +128,32 @@ may leave a gap but cannot reuse a number or publish behind a later post.
 Timestamps are display metadata, not ordering keys.
 
 `show` displays the most recent 20 posts by default (`--last N` or `--all`).
-It never acknowledges anything. `digest --cursor NAME` captures all unread
-posts in one snapshot; a first read and `--full` include **all** published
-posts. There is no implicit ten-post truncation. `--mark` updates the cursor
-only after the complete output has been written and flushed successfully.
-It acknowledges the last post in that snapshot, never a newly arriving post.
-Concurrent updates take the maximum cursor, so a delayed reader cannot move
-it backwards. Interrupted or failed delivery can repeat messages and does
-not acknowledge an omitted batch. Successful delivery means the output stream
-accepted the bytes, not that a human or model read them.
+It never acknowledges anything.
+
+`digest --cursor NAME` captures the board in one snapshot and is bounded:
+it prints at most `--limit` posts (default 20; `0` removes the bound).
+
+- For an existing cursor it prints the oldest unread posts, up to the
+  limit, and says how many more are unread.
+- With `--full`, or for a cursor that does not exist yet, it prints who
+  holds what (agents and claims) and the latest posts: the recovery view
+  after a session starts, resumes or compacts. A new reader starts there;
+  older history is `show --all`'s, not unread mail. For an existing cursor
+  with unread posts older than that window, it says how many it did not
+  show.
+
+`--mark` updates the cursor only after the complete output has been
+written and flushed successfully, and only through what was printed: it
+never moves past an unread post that the limit left out. So a batch view
+advances to its last printed post; the recovery view advances to the
+latest post for a new cursor, or when it printed every unread post, and
+otherwise leaves the cursor alone. It acknowledges posts of that snapshot,
+never a newly arriving post. Concurrent updates take the maximum cursor, so
+a delayed reader cannot move it backwards. Interrupted or failed delivery
+can repeat messages and does not acknowledge an omitted batch. Successful
+delivery means the output stream accepted the bytes, not that a human or
+model read them. The capability `bounded-digest` in `version --json` says a
+board bounds its digests this way.
 
 A repository without a board: `guard` and `digest` are silent successes;
 `who`, `claims` and `show` report “no board yet”; `path` reports its location.
@@ -148,7 +165,8 @@ Claude Code's `SessionStart` and `UserPromptSubmit` hooks call
 `.agent-board/claude-hook.sh`. It finds the executable as every caller
 does, from `AGENT_BOARD_COMMAND` (one absolute path) or else `PATH`, and
 does nothing when neither resolves. It uses a session cursor and `--mark`;
-`SessionStart` adds `--full` for a fresh or compacted context. The digest
+`SessionStart` adds `--full`, the bounded recovery view, for a fresh,
+resumed or compacted context. The digest
 runs under a five-second timeout, well inside the hook's 15 seconds, and
 the hook exits successfully, with nothing on stderr, even when the board
 reports an error. Codex agents read at task start, before shared edits/ref
@@ -206,14 +224,40 @@ Reference: [Git reference-transaction hook documentation](https://git-scm.com/do
 
 ## Delegation
 
-The coordinator registers, creates the branch and worktree, and releases any
-setup claim before delegation. The worker registers with its own handle and
-claims its branch and files. It commits within its authority, posts a handoff
+A brief states its mode on its first line: `Mode: independent. Handle:
+HANDLE.` or `Mode: supervised by HANDLE.`; without one, a worker in a
+project with `agent-board.conf` is independent.
+
+An independent worker registers with its own handle and claims its branch
+and files. The coordinator creates the branch and worktree and releases any
+setup claim first. The worker commits within its authority, posts a handoff
 with branch, commit and validation results, then releases claims and says
-`bye`. It also returns a complete final message. The coordinator reviews the
+`bye`, and returns a complete final message. The coordinator reviews the
 handoff and, only for an authorized integration, claims the destination
 branch and guards the affected resources. Normal delegation needs no forced
 takeover or identity sharing.
+
+A supervised worker does not use the board. Its coordinator claims first
+and keeps the claims until the worker has stopped writing, gives its
+workers disjoint scopes, relays what matters, and commits under its own
+handle. The skill's `references/delegation.md` has both procedures.
+
+## Project files and doctor
+
+`init`, `sync`, `update` and `remove` install the board's project files, as
+[project-integration.md](project-integration.md) specifies: the descriptor
+`agent-board.conf`, the inventory, the skill and its Claude alias, the
+digest-hook launcher, the hook entries in `.claude/settings.json` and the
+instruction block. The rules shared with the Isabelle tooling live in
+`src/project_files.py`, which that repository keeps an identical copy of.
+Installing never registers an agent and never installs the Git guards.
+
+`doctor` is read-only. It checks that the resolved executable is the one
+running, its checkout is at the pin and clean, the descriptor, the project
+files (`sync --check`), the storage, and both guards, and prints `[OK]`,
+`[NOTE]` and `[FAIL]` lines or, with `--json`, one object with stable check
+ids. It opens the board's lock only for reading, never creates it, and runs
+Git without optional locks, so a status check does not rewrite an index.
 
 ## Incomplete or corrupt state
 
@@ -254,7 +298,10 @@ checks:
 - Nested and nonexistent paths, roots, absolute paths, directory deletion,
   escapes, symlinks, tokens and advisory fragments.
 - Delayed/killed publishers, sequence gaps, arrivals during output, concurrent
-  readers, failed and interrupted delivery, and full first-read replay.
+  readers, failed and interrupted delivery; bounded digests that deliver
+  every unread post once and in order, a recovery view that never skips an
+  unread post, a new reader starting at the latest posts, and a 600-post
+  history whose digest stays under 4 KB.
 - Real owner/foreign merge, reset, rebase, update-ref, branch creation/deletion
   and multi-ref transactions in main and linked worktrees; rename limitations,
   unrelated refs, absent boards, and the `--no-verify` boundary.
@@ -269,3 +316,18 @@ checks:
   real path, and both-or-neither installation under injected failures.
 - The Claude hook: resolution, session cursors, `SessionStart` replay,
   malformed input, and the five-second bound with the lock held.
+
+`tests/project_test.py` covers the project files and doctor against a
+scratch runtime checkout built from the working tree: `init` in a new
+repository and next to the project's own settings, instruction files and
+skills; collisions, edited files, entries and blocks, unmanaged files in the
+skill directory; the index preflight (unstaged, untracked, ignored); a
+symlinked skill parent outside the checkout; malformed descriptors, a
+missing inventory and adoption through `update`; revisions without a
+manifest; `sync` keeping the pin and `update` moving it, with obsolete files
+removed; link mode; two installers at once; publication with `TMPDIR` on
+another filesystem; a failure injected after every publication step of
+`init`, `update` and `remove`, whose printed commands restore the tree
+exactly; every doctor check id and status, a doctor that cannot run, and
+doctor leaving the project, its Git directory and the runtime checkout
+unchanged.

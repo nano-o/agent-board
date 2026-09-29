@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,9 +23,16 @@ import time
 if sys.version_info < (3, 9):
     sys.exit('agent-board: needs Python 3.9 or later')
 
+# Doctor creates no file, not even a bytecode cache in this checkout.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import project_files  # noqa: E402
+from project_files import Broken, Refused  # noqa: E402
+
 VERSION = 2  # the on-disk state format
 INTERFACE = 1  # verbs, options, exit codes, environment, machine output
-CAPABILITIES = []  # additive features beyond the interface
+CAPABILITIES = ['bounded-digest', 'doctor', 'project']  # additive features beyond the interface
+DIGEST_LIMIT = 20
 MARKER = '# agent-board guard: remove with agent-board uninstall-hook.'
 EXECUTABLE = Path(__file__).resolve().parents[1] / 'bin' / 'agent-board'
 HANDLE = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}\Z')
@@ -225,6 +233,39 @@ class Board:
     def save(self):
         atomic_write(self.path / 'state.json', json.dumps(self.state, indent=2) + '\n')
 
+    def inspect(self):
+        """Doctor's read-only view: (status, message). Creates nothing, not even the lock."""
+        if not self.exists():
+            return 'ok', f'no board yet at {self.path}; the first hello, post or claim creates it'
+        state = self.path / 'state.json'
+        if not state.exists():
+            return 'fail', (f'incomplete board state at {self.path}: state.json is missing. Restore it from a '
+                            'backup with clients stopped, or remove the directory if the board held nothing '
+                            'worth keeping')
+        lock = self.path / '.lock'
+        fd = os.open(lock, os.O_RDONLY) if lock.exists() else None
+        try:
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_SH)
+            try:
+                self.state = json.loads(state.read_text())
+            except ValueError as exc:
+                return 'fail', f'malformed authoritative board state; repair from backup: {exc}'
+            self.validate()
+            marker = self.path / 'format'
+            if not marker.exists() or marker.read_text() != f'{VERSION}\n':
+                return 'fail', f'unsupported, malformed or missing board format marker at {marker}'
+            agents, posts = self.agents(), self.posts()
+            claims = self.state['claims']
+            stale = sum(1 for c in claims if self.stale(c['owner'], agents))
+            return 'ok', (f'board at {self.path}, format {VERSION}: {len(agents)} agent(s), {len(claims)} claim(s) '
+                          f'({stale} stale), {len(posts)} post(s)')
+        except BoardError as exc:
+            return 'fail', str(exc)
+        finally:
+            if fd is not None:
+                os.close(fd)
+
     def agents(self):
         result = {}
         for path in sorted((self.path / 'agents').iterdir()):
@@ -270,6 +311,9 @@ class Board:
                 raise BoardError(f'malformed post sequence: {path.name}')
             result.append((int(path.stem), path.read_text()))
         return result
+
+    def has_cursor(self, name):
+        return (self.path / 'cursors-v2' / name).exists()
 
     def cursor(self, name):
         path = self.path / 'cursors-v2' / name
@@ -365,6 +409,43 @@ class Board:
         return int(blocked), messages
 
 
+def digest(board, args, agents, posts):
+    """(code, output, the post to acknowledge through, or None). Bounded by --limit.
+
+    A cursor never moves past an unread post that was not printed. A new
+    cursor, or --full after compaction or resume, gets who holds what and
+    the latest posts; a new reader starts there, and older history stays
+    available through show --all."""
+    known = board.has_cursor(args.cursor)
+    seen = board.cursor(args.cursor)
+    unread = [p for p in posts if p[0] > seen]
+    limit, cursor = args.limit, args.cursor
+    state = '\nAgents\n' + board.render_agents(agents) + '\nClaims\n' + board.render_claims(agents)
+    if args.full or not known:
+        shown = posts[-limit:] if limit else posts
+        omitted = [p for p in unread if not shown or p[0] < shown[0][0]]
+        out = (f'Coordination board ({board.path}): {len(unread)} unread post(s); who holds what, and the latest '
+               f'{len(shown)} of {len(posts)} post(s)\n' + state)
+        if shown:
+            out += '\nPosts\n' + render_posts(shown)
+        if known and omitted:
+            out += (f'\n{len(omitted)} older unread post(s) are not shown: run digest --cursor {cursor} --mark '
+                    'to read them.\n')
+        elif len(posts) > len(shown):
+            out += f'\n{len(posts) - len(shown)} earlier post(s) are not shown; show --all lists them.\n'
+        mark = posts[-1][0] if posts and (not known or (unread and not omitted)) else None
+        return 0, out, mark
+    shown = unread[:limit] if limit else unread
+    if not shown:
+        return 0, '', None
+    more = len(unread) - len(shown)
+    out = (f'Coordination board ({board.path}): {len(shown)} new post(s)' +
+           (f', {more} more unread' if more else '') + '\n' + state + '\nPosts\n' + render_posts(shown))
+    if more:
+        out += f'\n{more} more unread post(s): run digest --cursor {cursor} --mark again to read them.\n'
+    return 0, out, shown[-1][0]
+
+
 def render_posts(posts):
     output = ''
     for _, contents in posts:
@@ -394,14 +475,25 @@ def parser():
     q = sub.add_parser('bye'); q.add_argument('message', nargs='*')
     q = sub.add_parser('post'); q.add_argument('--kind', default='note'); q.add_argument('--re', default=''); q.add_argument('message', nargs='*')
     q = sub.add_parser('show'); q.add_argument('--last', type=int, default=20); q.add_argument('--all', action='store_true')
-    q = sub.add_parser('digest', help='Emit ALL unread posts, or all posts with --full; mark only after successful output')
+    q = sub.add_parser('digest', help='Print unread posts, oldest first and at most --limit (default 20; 0: no limit); '
+                       'with --full or a new cursor, who holds what and the latest posts. --mark acknowledges only '
+                       'what was printed, after output succeeds')
     q.add_argument('--cursor'); q.add_argument('--mark', action='store_true'); q.add_argument('--full', action='store_true')
+    q.add_argument('--limit', type=int, default=DIGEST_LIMIT)
     q = sub.add_parser('claim'); q.add_argument('--force', action='store_true'); q.add_argument('--reason'); q.add_argument('resources', nargs='*')
     q = sub.add_parser('release'); q.add_argument('--all', action='store_true'); q.add_argument('resources', nargs='*')
     q = sub.add_parser('guard'); q.add_argument('--staged', action='store_true'); q.add_argument('resources', nargs='*')
     q = sub.add_parser('guard-refs', help='Internal reference-transaction guard; reads full stdin before locking'); q.add_argument('state')
     q = sub.add_parser('install-hook', help='Install pre-commit and reference-transaction hooks'); q.add_argument('--force', action='store_true')
     q = sub.add_parser('version', help='Print the interface, state format, capabilities and executable'); q.add_argument('--json', action='store_true')
+    q = sub.add_parser('init', help='Install the project files, pinned at --revision (default stable)'); q.add_argument('--revision', default='stable')
+    q = sub.add_parser('sync', help='Reinstall the pinned project files; --link symlinks the skill to --source; --check only checks')
+    q.add_argument('--link', action='store_true'); q.add_argument('--source'); q.add_argument('--check', action='store_true')
+    q.add_argument('--allow-dirty', action='store_true', help='with --check: link mode is a note, not a failure')
+    q = sub.add_parser('update', help='Pin REV and install its project files'); q.add_argument('revision', metavar='REV')
+    sub.add_parser('remove', help='Remove the unchanged project files, the inventory and agent-board.conf')
+    q = sub.add_parser('doctor', help='Read-only check of the executable, project files, storage and Git guards')
+    q.add_argument('--allow-dirty', action='store_true'); q.add_argument('--json', action='store_true')
     return p
 
 
@@ -499,13 +591,14 @@ def checkout_git(*args):
     env = {k: v for k, v in os.environ.items() if k not in (
         'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR',
         'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE')}
+    env['GIT_OPTIONAL_LOCKS'] = '0'  # status must not refresh the index: doctor writes nothing
     result = subprocess.run(['git', '-C', str(EXECUTABLE.parents[1]), *args], capture_output=True, env=env)
     return result.returncode, result.stdout.decode(errors='surrogateescape').rstrip('\n')
 
 
-def version(as_json):
+def checkout_state():
+    """(commit, clean) of the executable's own checkout, or (None, None)."""
     checkout = EXECUTABLE.parents[1]
-    commit = clean = None
     code, top = checkout_git('rev-parse', '--show-toplevel')
     # Only a checkout of agent-board itself has a commit, not a copy inside another repository.
     if not code and Path(top).resolve() == checkout:
@@ -514,13 +607,192 @@ def version(as_json):
             code, status = checkout_git('status', '--porcelain', '--ignore-submodules=none')
             if code:
                 raise BoardError(f'git status failed in {checkout}')
-            commit, clean = head, not status
+            return head, not status
+    return None, None
+
+
+def version(as_json):
+    commit, clean = checkout_state()
     if as_json:
         return json.dumps(dict(interface=INTERFACE, state_format=VERSION, capabilities=CAPABILITIES,
                                commit=commit, clean=clean, executable=str(EXECUTABLE))) + '\n'
     where = f"commit {commit} ({'clean' if clean else 'modified'})" if commit else 'not a Git checkout'
     return (f"agent-board interface {INTERFACE}, state format {VERSION}, "
             f"capabilities: {' '.join(CAPABILITIES) or 'none'}; {where}; executable {EXECUTABLE}\n")
+
+
+PROJECT_VERBS = ('init', 'sync', 'update', 'remove', 'doctor')
+GUARDS = ('pre-commit', 'reference-transaction')
+CHECK_ORDER = ('executable.resolved', 'executable.revision', 'executable.clean', 'descriptor', 'files', 'storage',
+               'guard.pre-commit', 'guard.reference-transaction')
+TAGS = dict(ok='[OK]  ', note='[NOTE]', fail='[FAIL]')
+
+
+class BoardSpec:
+    """agent-board's part of the project files; project_files holds the shared rules."""
+    name = command = 'agent-board'
+    descriptor = 'agent-board.conf'
+    revision_key = 'board_revision'
+    inventory_dir = '.agent-board'
+    manifest = 'integrations/project/manifest.json'
+
+    def __init__(self):
+        self.runtime = project_files.Runtime(EXECUTABLE.parents[1])
+
+    def read_descriptor(self, text):
+        values = project_files.parse_key_values(text, self.descriptor)
+        for key in values:
+            if key not in ('format_version', 'board_revision'):
+                raise Refused(f'{self.descriptor}: unknown key: {key}')
+        if values.get('format_version') != '1':
+            raise Refused(f"{self.descriptor}: unsupported format_version {values.get('format_version')!r} (expected 1)")
+        if not project_files.FULL_REVISION.fullmatch(values.get('board_revision', '')):
+            raise Refused(f'{self.descriptor}: board_revision must be a full 40-hex commit')
+        return values
+
+    def substitutions(self, values):
+        return {}
+
+
+def descriptor_text(revision):
+    return ('# agent-board project descriptor. Data only: key=value, never sourced.\n'
+            f'format_version=1\nboard_revision={revision}\n')
+
+
+def resolve_executable():
+    """The executable every caller but a Git guard uses: AGENT_BOARD_COMMAND, else PATH."""
+    cmd = os.environ.get('AGENT_BOARD_COMMAND', '')
+    if cmd:
+        if not (cmd.startswith('/') and os.path.isfile(cmd) and os.access(cmd, os.X_OK)):
+            return None, f'AGENT_BOARD_COMMAND={cmd} is not the absolute path of an executable file'
+    else:
+        cmd = shutil.which('agent-board') or ''
+        if not cmd.startswith('/'):
+            return None, 'agent-board is not on PATH and AGENT_BOARD_COMMAND is not set'
+    return Path(os.path.realpath(cmd)), None
+
+
+def guard_checks(root, executable):
+    directory = Path(git(root, 'rev-parse', '--path-format=absolute', '--git-path', 'hooks'))
+    kinds = {}
+    for name in GUARDS:
+        path = directory / name
+        if owned(path):
+            kinds[name] = 'current' if path.read_text(errors='replace') == hook_text(name, executable) else 'stale'
+        else:
+            kinds[name] = 'foreign' if path.exists() else 'absent'
+    installed = [n for n in GUARDS if kinds[n] in ('current', 'stale')]
+    checks = []
+    for name in GUARDS:
+        other = GUARDS[1 - GUARDS.index(name)]
+        path, backup = directory / name, directory / (name + '.pre-board')
+        if kinds[name] == 'current':
+            if kinds[other] in ('current', 'stale'):
+                checks.append(('ok', f'{path} is current and calls {executable}'))
+            else:
+                checks.append(('fail', f'{path} is installed without the {other} guard; run agent-board install-hook'))
+        elif kinds[name] == 'stale':
+            checks.append(('fail', f'{path} is an edited or outdated guard, or calls another executable than '
+                                   f'{executable}; run agent-board install-hook'))
+        elif backup.exists():
+            checks.append(('fail', f'{backup} exists without its guard; restore it as {name}, or run agent-board '
+                                   'install-hook'))
+        elif installed:
+            checks.append(('fail', f'no {name} guard, but the {other} guard is installed; run agent-board install-hook'
+                                   + (' --force to chain the existing hook' if kinds[name] == 'foreign' else '')))
+        else:
+            checks.append(('note', f'no {name} guard' + (' (a foreign hook is there)' if kinds[name] == 'foreign' else '')
+                                   + '; agent-board install-hook installs both guards'))
+    return checks
+
+
+def doctor(args, root, board, spec):
+    checks = []
+
+    def add(check_id, status, message):
+        checks.append(dict(id=check_id, status=status, message=message))
+    resolved, why = resolve_executable()
+    if resolved is None:
+        add('executable.resolved', 'fail', why)
+    elif resolved != EXECUTABLE:
+        add('executable.resolved', 'fail', f'agent-board resolves to {resolved}, not to {EXECUTABLE}, which runs '
+                                           'this doctor; the digest hook and the ic2 notes use the resolved one')
+    else:
+        add('executable.resolved', 'ok', f'agent-board resolves to {EXECUTABLE}')
+    values = None
+    try:
+        _, values = project_files.read_descriptor(project_files.Tree(root), spec)
+        add('descriptor', 'ok', f"{spec.descriptor} pins {values['board_revision']}")
+    except Refused as exc:
+        add('descriptor', 'fail', str(exc))
+    commit, clean = checkout_state()
+    checkout = EXECUTABLE.parents[1]
+    if commit is None:
+        add('executable.revision', 'fail', f'{checkout} is not a Git checkout of agent-board; its revision is unknown')
+        add('executable.clean', 'fail', f'{checkout} is not a Git checkout of agent-board')
+    else:
+        if values is None:
+            add('executable.revision', 'fail', f'{checkout} is at {commit}; there is no valid pin to compare it with')
+        elif commit != values['board_revision']:
+            add('executable.revision', 'fail', f"{checkout} is at {commit}, but this project pins "
+                                               f"{values['board_revision']}; check that revision out there, or move "
+                                               'the project with agent-board update')
+        else:
+            add('executable.revision', 'ok', f'{checkout} is at the pin')
+        if clean:
+            add('executable.clean', 'ok', f'{checkout} is clean')
+        elif args.allow_dirty:
+            add('executable.clean', 'note', f'{checkout} is modified (--allow-dirty)')
+        else:
+            add('executable.clean', 'fail', f'{checkout} is modified; commit or discard the changes, or pass --allow-dirty')
+    if values is None:
+        add('files', 'fail', 'not checked: the project is not set up')
+    else:
+        findings = [f for f in project_files.check(root, spec, args.allow_dirty)[0] if f[1] == 'files']
+        statuses = {status for status, _, _ in findings}
+        worst = 'fail' if 'fail' in statuses else 'note' if 'note' in statuses else 'ok'
+        add('files', worst, '; '.join(m for s, _, m in findings if s != 'ok') or
+            '; '.join(m for s, _, m in findings))
+    add('storage', *board.inspect())
+    for name, (status, message) in zip(GUARDS, guard_checks(root, resolved or EXECUTABLE)):
+        add(f'guard.{name}', status, message)
+    checks.sort(key=lambda c: CHECK_ORDER.index(c['id']))
+    ok = not any(c['status'] == 'fail' for c in checks)
+    if args.json:
+        return int(not ok), json.dumps(dict(interface=INTERFACE, ok=ok, checks=checks)) + '\n', '', None
+    out = ''.join(f"{TAGS[c['status']]} {c['id']}: {c['message']}\n" for c in checks)
+    out += 'agent-board doctor: ' + ('all checks passed.\n' if ok else 'problems found.\n')
+    return int(not ok), out, '', None
+
+
+def project(args, root, board):
+    spec = BoardSpec()
+    action = args.action
+    if action == 'doctor':
+        return doctor(args, root, board, spec)
+    if action == 'init':
+        revision = spec.runtime.commit(args.revision)
+        return 0, project_files.init(root, spec, revision, descriptor_text(revision)), '', None
+    if action == 'sync':
+        if args.check:
+            if args.link or args.source:
+                raise Broken('sync --check takes neither --link nor --source')
+            findings, _ = project_files.check(root, spec, args.allow_dirty)
+            return int(any(f[0] == 'fail' for f in findings)), project_files.render_findings(findings), '', None
+        if args.allow_dirty:
+            raise Broken('--allow-dirty goes with sync --check')
+        if args.source and not args.link:
+            raise Broken('--source goes with sync --link')
+        return 0, project_files.sync(root, spec, args.link, args.source), '', None
+    if action == 'update':
+        return 0, project_files.update(root, spec, args.revision), '', None
+    out = project_files.remove(root, spec)
+    if board.exists():
+        out += f'The board data at {board.path} stays; delete it by hand once nothing on it is worth keeping.\n'
+    hooks_dir = Path(git(root, 'rev-parse', '--path-format=absolute', '--git-path', 'hooks'))
+    if any(owned(hooks_dir / name) for name in GUARDS):
+        out += 'The Git guards stay installed; agent-board uninstall-hook removes them.\n'
+    return 0, out, '', None
 
 
 def execute(args):
@@ -543,6 +815,10 @@ def execute(args):
     if not re.fullmatch('[0-9]+', stale_minutes):
         raise BoardError('AGENT_BOARD_STALE_MINUTES must be a non-negative integer')
     board = Board(path, root, int(stale_minutes))
+    if action in PROJECT_VERBS:
+        if not common:
+            raise BoardError(f'{action} needs a Git repository')
+        return project(args, root, board)
     if action in ('install-hook', 'uninstall-hook'):
         if not common:
             raise BoardError('hook installation needs a Git repository')
@@ -572,6 +848,8 @@ def execute(args):
     if action == 'show' and args.last < 0:
         raise BoardError('--last must be non-negative')
     if action == 'digest':
+        if args.limit < 0:
+            raise BoardError('--limit must be non-negative')
         args.cursor = args.cursor or handle
         if not args.cursor or not CURSOR.fullmatch(args.cursor):
             raise BoardError('invalid cursor name: use --cursor NAME or an agent handle')
@@ -657,21 +935,16 @@ def execute(args):
                 out += f"\nClaims ({len(board.state['claims'])})\n" + board.render_claims(agents)
                 out += f'\nPosts ({len(selected)} of {len(posts)})\n' + render_posts(selected)
             else:
-                seen = 0 if args.full else board.cursor(args.cursor)
-                selected = [(n, body) for n, body in posts if n > seen]
-                if selected or not seen:
-                    out = f'Coordination board ({path}): {len(selected)} new post(s)\n\nAgents\n'
-                    out += board.render_agents(agents) + '\nClaims\n' + board.render_claims(agents)
-                    if selected:
-                        out += '\nPosts\n' + render_posts(selected)
-                if args.mark and selected:
-                    ack = (board, args.cursor, selected[-1][0])
+                code, out, mark = digest(board, args, agents, posts)
+                if args.mark and mark:
+                    ack = (board, args.cursor, mark)
     return code, out, err, ack
 
 
 def main():
+    args = parser().parse_args()
     try:
-        code, out, err, ack = execute(parser().parse_args())
+        code, out, err, ack = execute(args)
         sys.stderr.write(err)
         sys.stderr.flush()
         sys.stdout.write(out)
@@ -679,8 +952,16 @@ def main():
         if ack:
             ack[0].acknowledge(ack[1], ack[2])
         return code
-    except (BoardError, OSError, ValueError) as exc:
-        print(f'agent-board: {exc}', file=sys.stderr)
+    except Refused as exc:
+        print(exc if str(exc).startswith('agent-board') else f'agent-board: {exc}', file=sys.stderr)
+        return 1
+    except (BoardError, Broken, OSError, ValueError) as exc:
+        message = str(exc) if str(exc).startswith('agent-board') else f'agent-board: {exc}'
+        if args.action == 'doctor' and args.json:
+            # Callers treat exit 2 as a failure; still give them an object when possible.
+            print(json.dumps(dict(interface=INTERFACE, ok=False,
+                                  checks=[dict(id='doctor', status='fail', message=message)])))
+        print(message, file=sys.stderr)
         return 2
 
 

@@ -198,7 +198,7 @@ assert_output_contains show "    line two"
 run_and_capture 0 show_all board_main show --all
 assert_output_contains show_all "[hello]"
 run_and_capture 0 digest_first board_main digest --cursor c1 --mark
-assert_output_contains digest_first "new post(s)"
+assert_output_contains digest_first "who holds what, and the latest"
 assert_output_contains digest_first "Claims"
 run_and_capture 0 digest_quiet board_main digest --cursor c1 --mark
 assert_silent digest_quiet

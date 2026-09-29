@@ -1,0 +1,17 @@
+{
+  "format": 1,
+  "component": "agent-board",
+  "skills": [
+    {"name": "agent-coordination", "source": "skills/agent-coordination"}
+  ],
+  "files": [
+    {"path": ".agent-board/claude-hook.sh", "source": "integrations/claude/hook.sh", "executable": true}
+  ],
+  "json_entries": [
+    {"file": ".claude/settings.json", "pointer": "/hooks/SessionStart", "element": true,
+     "marker": ".agent-board/claude-hook.sh", "source": "integrations/project/claude-hook-entry.json"},
+    {"file": ".claude/settings.json", "pointer": "/hooks/UserPromptSubmit", "element": true,
+     "marker": ".agent-board/claude-hook.sh", "source": "integrations/project/claude-hook-entry.json"}
+  ],
+  "markdown_block": "integrations/project/instructions-block.md"
+}

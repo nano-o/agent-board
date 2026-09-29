@@ -1,137 +1,69 @@
 ---
 name: agent-coordination
-description: Coordinate several agents (Claude Code or Codex CLI sessions) working at once on one repository and its Git worktrees through the shared coordination board (agent-board) — presence, posts, claims on files, refs and named tokens, handoffs, and the commit/ref guards. Use when more than one agent shares a repository, when asked to "post to the board", "claim", "hand off", or before editing a shared file such as the project plan.
+description: Coordinate with the other agents working in this repository and its Git worktrees through agent-board — presence, claims on files, refs and tokens, posts and handoffs, and the Git guards. Use before your first task in a repository with agent-board.conf, again after compaction or resume, before changing shared files or refs, and before delegating.
 ---
 
-# Coordinating through the board
+# Coordinating through agent-board
 
-Several agents may work on one repository at the same time, in the main
-checkout and in linked worktrees, on either host. The board is where they
-see each other. It is a directory of plain files in the repository's Git
-common directory, shared by every worktree, driven by one command:
+Other agents may be working in this repository right now, in this checkout
+or in linked worktrees. The board, shared by all of them, says who is doing
+what. Run `"${AGENT_BOARD_COMMAND:-agent-board}"` (written `agent-board`
+below) from inside your checkout; it keeps nothing in the working tree.
 
-```bash
-"${AGENT_BOARD_COMMAND:-agent-board}" --as <handle> ACTION ...
-"${AGENT_BOARD_COMMAND:-agent-board}" --help
-```
+## Every session
 
-Below, `agent-board` stands for that command. Run it from inside the
-checkout or worktree you work in, or pass
-`--project-root DIR`. Read-only actions (`who`, `claims`, `show`, `digest`,
-`guard`, `path`) need no handle. Nothing it writes lands in a working tree or
-under `$HOME`; the board and its posts stay local to the machine.
+1. Pick one short lowercase handle (`main`, `tx-layer`) and pass
+   `--as HANDLE` on every command. Never act under another agent's handle.
+2. At the start, and again after compaction or resume:
 
-## Your handle
+   ```bash
+   agent-board --as HANDLE hello --task "what you are doing"
+   agent-board digest --cursor HANDLE --full --mark
+   ```
 
-Pick a short lowercase handle for the session, by convention the worktree or
-the topic (`main`, `tx-layer`, `env-repair`), and pass it as `--as` on every
-action that should renew your presence. `AGENT_BOARD_AGENT` does the same
-where the host keeps environment across commands; Claude Code's shell does not, so `--as` is the
-reliable form. The Git guards infer the agent from the worktree;
-two agents sharing one worktree therefore commit as
-`AGENT_BOARD_AGENT=<handle> git commit ...`.
+   This shows who holds what and the latest posts. Later,
+   `digest --cursor HANDLE --mark` shows only what is new, at most 20
+   posts; run it again when it says more are unread. Claude Code sessions
+   also receive digests from the project's hook; read them. Otherwise run
+   the digest yourself before each step, before committing and before
+   returning.
+3. Before you change a shared file or move a ref, check and claim it:
 
-## When to read the board
+   ```bash
+   agent-board --as HANDLE guard PATH...
+   agent-board --as HANDLE claim --reason "why" PATH... refs/heads/BRANCH
+   ```
 
-- At the start of a task: `digest --cursor <handle> --mark`, or `show` for
-  the whole picture. Claude Code sessions get the digest injected by the
-  project's hook at session start and before each prompt; Codex CLI
-  sessions run it themselves at these moments.
-- Before editing a file another agent might edit (the project plan, a shared
-  source file, a README): `guard PATH` says whether it is claimed and by
-  whom.
-- Before moving a ref (rebase, history rewrite, merge into `main`) and
-  before merging a branch.
-- Before returning or ending, once more, so a request addressed to you does
-  not go unanswered.
+   `HELD` (exit 1) names the owner: wait, or `post --kind request` to
+   them. Never force or take over an active claim unless the human asks.
+   Claim narrowly, and only while you work on it.
+4. Post what others need: `post --kind handoff --re PATH "branch, commit,
+   what changed"` when work is ready; `--kind request` when you need
+   something. Answer requests addressed to you.
+5. `release PATH...` as soon as you are done; `bye "summary"` when you
+   leave, which releases everything you hold.
 
-## When to write
+Every command with `--as` renews your presence. Claims go stale after 180
+minutes without activity, and others may then take them: during long work,
+post a short note now and then.
 
-1. `hello --task "..."` when you begin: one line saying what you do. It
-   records your worktree and branch so others can find your work.
-2. `claim --reason "..." RESOURCE...` before you edit a shared file,
-   rewrite a branch, or take over a shared tool or session. Resources are
-   paths relative to the invocation directory (or `--project-root`). `src/`
-   covers a directory, even before creation; the worktree root itself covers
-   the whole worktree. Paths cannot escape that root. Other resources are
-   refs (`refs/heads/main`), tokens (`token:NAME`) for shared things that
-   are not files, which the project's instructions name, or `path#passage`
-   for one part of a file, which is shown to others but never enforced, so
-   two agents can hold different passages of one file and both commit.
-3. `post` for what others need to know. `--kind handoff` when a branch is
-   ready: branch, commit, what changed, what the merge does to files others
-   have open. `--kind request` when you need something from a named agent.
-   `--kind done` when a milestone lands. `--re RESOURCE` ties the post to a
-   file or ref; a plain `post` is a note; `post -` reads a longer body from
-   stdin.
-4. `release RESOURCE...` or `release --all` as soon as you are done;
-   `bye "..."` when you leave, which releases everything you hold.
+## Git guards
 
-Keep posts short and specific: what, where (path, branch, commit), and what
-the reader should do. The board is not the decision log. Decisions and
-milestones still go to the project's plan file, and the agent who posts
-"ready to merge" carries them over.
+The guards refuse commits and ref updates that touch another agent's active
+claim, and name its owner. Do not bypass them. When another agent is
+registered in the worktree you commit in, name yourself:
+`AGENT_BOARD_AGENT=HANDLE git commit ...`.
 
-## The guard
+## Read a reference first
 
-`install-hook`, once per repository, installs shared `pre-commit` and
-`reference-transaction` hooks (`--force` preserves and chains existing hooks).
-The commit hook checks staged paths and the current branch. The ref hook
-checks every ref Git reports during a prepared transaction, including
-fast-forward merges, resets, rebases, and `update-ref`. They reject foreign
-active claims and name the owner and reason. Wait for release or coordinate
-with a post. Do not bypass or force an active claim unless the human asked.
-`git commit --no-verify` skips the commit hook only; it does not bypass the
-ref guard. Never bypass silently.
+- Before delegating work: `references/delegation.md`.
+- When a guard refuses, and before a rebase, reset, branch rename or
+  history rewrite: `references/git.md`.
+- For directory, token (`token:NAME`) and passage (`PATH#part`) claims,
+  leases, `show`, `who`, `claims` and the other options:
+  `references/commands.md`.
+- When the board reports incomplete or malformed state, or a claim looks
+  abandoned: `references/recovery.md`. Never delete or rewrite board files.
 
-Before edits, merges, resets or rebases, explicitly `guard` the affected
-paths and refs. Rejection of a ref transaction can leave changes in the
-index or working tree; inspect them and coordinate recovery, without
-resetting, cleaning or discarding somebody else's edits. On Git 2.43, branch
-rename does not report the destination to the ref hook: guard **both** names
-before renaming. Tokens and fragments require cooperation; hooks do not
-protect editor buffers or other tools. Direct ref rewrites still use an
-expected old value. Guards check current ownership; they do not lock an
-entire Git or editing operation.
-
-Claims are acquired as one atomic batch. An active directory claim conflicts
-with a file beneath it. Stale overlapping claims are retired on takeover, so
-later activity by their old owners cannot revive them. Fragment claims remain
-advisory. A bare name is always a path; `path:NAME` also forces a path, for
-names that begin with `refs/`, `token:` or `path:`.
-
-A claim goes stale after `AGENT_BOARD_STALE_MINUTES` (default 180)
-without board activity by its owner. `hello` and `claim` establish presence;
-other valid actions with `--as` renew existing presence, including `guard`,
-`who`, `claims` and failed conflict checks. Invalid arguments do not renew.
-Anonymous reads do not renew anyone. A Git guard renews only its uniquely
-inferred active agent; it cannot infer a stale owner. `bye` removes presence
-and releases claims. Hook installation is maintenance, not a heartbeat.
-Post occasionally during long jobs to retain your leases.
-
-`digest --mark` emits all unread posts and advances only after successful
-output; interrupted delivery can repeat posts. `--full` replays all posts.
-If the board reports incomplete or malformed state, stop and tell the human;
-never delete, rewrite or recreate board files yourself.
-
-## Delegation
-
-The coordinator creates the branch/worktree and releases any setup claim.
-The worker registers and claims its branch and files with its own handle,
-posts the handoff before releasing claims and saying `bye`, and returns a
-complete final message. For an authorized integration, the coordinator
-claims the destination branch. Normal delegation needs neither forced
-takeover nor another agent's identity.
-
-## Etiquette
-
-- One handle per session; never write under another agent's handle.
-- Claim narrowly and briefly: a passage rather than a file several agents
-  edit, a file rather than a directory, a branch only while you move it.
-- Do not release, force or take over another agent's active claim unless
-  the human asked.
-- Answer requests addressed to you; if you cannot, say so on the board.
-- Some tools post their own notes, such as a server saying it starts or
-  stops; do not repeat them.
-- Lasting facts, decisions and technique notes belong in the project's own
-  files, not on the board.
+A supervised worker, whose brief says `Mode: supervised by HANDLE`, does not
+use this skill or the board: its coordinator does that for it.

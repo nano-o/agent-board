@@ -7,13 +7,15 @@ them here, and this repository now owns the agent-board part. Each
 repository keeps its own copy of the shared rules, and a change to them is
 made in both.
 
-**Status.** Implemented: the storage and its incomplete-state rule, the CLI
-without `migrate`, `version`, the Git guards as "Git guards" describes, and
-the Claude hook at `integrations/claude/hook.sh`. `version` reports no
-capabilities yet: `doctor` and `project` are added when those commands
-exist. Not implemented yet: `init`, `sync`, `update` and `remove`, the
-inventory and descriptor, `doctor`, the settings entries and the
-instruction block.
+**Status.** Everything below is implemented: the storage and its
+incomplete-state rule, the CLI without `migrate`, `version` with the
+capabilities `bounded-digest`, `doctor` and `project`, the Git guards, the
+Claude hook, the project operations with their inventory, descriptor,
+settings entries and instruction block, and `doctor`. The shared rules are
+implemented in `src/project_files.py`, kept identical to the Isabelle
+tooling's `scripts/project_files.py`. Where the implementation settles a
+detail the text left open, "Decisions made in implementation" at the end
+records it.
 
 ## Shared rules
 
@@ -483,3 +485,31 @@ installs guards.
 - The `.pre-board` chaining suffix, the state format and the other verbs
   keep their names.
 
+## Decisions made in implementation
+
+Recorded on 2026-09-28, with step 3 of the tooling's delivery plan; both
+repositories' copies of the shared rules carry the same list.
+
+- `sync --check` exits 1 in link mode, since the files are not the pinned
+  ones; `sync --check --allow-dirty` makes link mode a note, which is what
+  both doctors use under `--allow-dirty`. It also fails when the runtime
+  checkout is not at the pin, as "the running scripts come from that
+  revision" requires; board doctor reports that as `executable.revision`
+  and folds only the file findings into `files`.
+- The inventory records a `marker` with each array-element entry, so an
+  entry that a later manifest drops can still be found and removed.
+- Installed files get Git's checkout modes, 0777 or 0666 less the umask, so
+  a `git restore` after a failure gives the same modes.
+- Restore commands are printed as `rm -f`, then `rmdir`, then `git
+  restore`, run from the checkout root, so that `git restore` never writes
+  through a symlink an install created. A link-mode symlink removed by a
+  failed install is not recreated by them; the message says to rerun
+  `sync --link`.
+- `update` refuses in link mode; `sync` first restores the copies.
+- `remove` without an inventory refuses, and `remove` also refuses when
+  the inventory directory holds files it did not install.
+- An emptied JSON file is deleted, and so is a TOML file left empty by
+  removing its block; directories left empty by deletions are removed,
+  never the checkout root.
+- There is no gitignored local state yet, so neither inventory directory
+  has its own `.gitignore`.

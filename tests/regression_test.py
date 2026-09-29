@@ -102,6 +102,77 @@ class BoardTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('must be replayed', self.b('digest', '--cursor', 'reader').stdout)
 
+    def posts(self, first, count, prefix='m'):
+        for n in range(first, first + count):
+            self.b('--as', 'alice', 'post', f'{prefix}-{n:03d}')
+
+    def delivered(self, out):
+        return [line.strip() for line in out.splitlines() if line.strip().startswith('m-')]
+
+    def test_bounded_digest_delivers_every_unread_post_once_in_order(self):
+        self.posts(0, 1)
+        self.b('digest', '--cursor', 'reader', '--mark')
+        self.posts(1, 45)
+        seen, rounds = [], 0
+        while True:
+            out = self.b('digest', '--cursor', 'reader', '--mark').stdout
+            if not out:
+                break
+            rounds += 1
+            batch = self.delivered(out)
+            self.assertLessEqual(len(batch), 20)
+            self.assertEqual('more unread' in out, len(seen) + len(batch) < 45)
+            seen += batch
+        self.assertEqual(seen, [f'm-{n:03d}' for n in range(1, 46)])
+        self.assertEqual(rounds, 3)
+
+    def test_full_digest_never_skips_unread_posts(self):
+        self.posts(0, 5)
+        self.b('digest', '--cursor', 'reader', '--mark')
+        self.posts(5, 30)
+        out = self.b('digest', '--cursor', 'reader', '--full', '--mark').stdout
+        self.assertEqual(self.delivered(out), [f'm-{n:03d}' for n in range(15, 35)])
+        self.assertIn('10 older unread post(s) are not shown', out)
+        # The cursor did not move past the ten it did not print.
+        self.assertEqual(self.delivered(self.b('digest', '--cursor', 'reader', '--mark').stdout)[:2],
+                         ['m-005', 'm-006'])
+
+    def test_full_digest_marks_when_it_shows_every_unread_post(self):
+        self.posts(0, 30)
+        self.b('digest', '--cursor', 'reader', '--mark')
+        self.posts(30, 5)
+        out = self.b('digest', '--cursor', 'reader', '--full', '--mark').stdout
+        self.assertEqual(self.delivered(out), [f'm-{n:03d}' for n in range(15, 35)])
+        self.assertIn('15 earlier post(s) are not shown', out)
+        self.assertEqual(self.b('digest', '--cursor', 'reader').stdout, '')
+
+    def test_new_reader_starts_at_the_latest_posts(self):
+        self.claim('alice', 'PLAN.md')
+        self.posts(0, 30)
+        out = self.b('digest', '--cursor', 'reader', '--mark').stdout
+        self.assertIn('who holds what', out)
+        self.assertIn('PLAN.md  held by alice', out)
+        self.assertEqual(self.delivered(out), [f'm-{n:03d}' for n in range(10, 30)])
+        self.assertIn('11 earlier post(s) are not shown; show --all lists them', out)
+        self.assertEqual(self.b('digest', '--cursor', 'reader').stdout, '')
+        everything = self.b('digest', '--cursor', 'other', '--limit', '0').stdout
+        self.assertEqual(len(self.delivered(everything)), 30)
+        self.assertIn('--limit must be non-negative', self.b('digest', '--cursor', 'x', '--limit', '-1',
+                                                           check=False).stderr)
+
+    def test_digest_of_a_long_history_stays_bounded(self):
+        import sys
+        sys.path.insert(0, str(ROOT / 'src'))
+        import agent_board
+        board = agent_board.Board(self.board, self.repo)
+        with board.locked(create=True):
+            for n in range(600):
+                board.post('alice', 'note', '', f'history post {n} ' + 'x' * 60)
+        out = self.b('digest', '--cursor', 'new-session', '--full', '--mark').stdout
+        self.assertEqual(out.count('[note]'), 20)
+        self.assertLess(len(out.encode()), 4000)
+        self.assertEqual(self.b('digest', '--cursor', 'new-session').stdout, '')
+
     def test_foreign_fast_forward_is_blocked(self):
         self.git('checkout', '-qb', 'feature')
         (self.repo / 'PLAN.md').write_text('new\n')

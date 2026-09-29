@@ -3,4 +3,4 @@ set -euo pipefail
 # Public CLI; Python's standard library supplies flock and atomic snapshots.
 # Resolve this file itself, so a symlink on PATH still finds the checkout.
 CHECKOUT="$(dirname "$(dirname "$(readlink -f -- "${BASH_SOURCE[0]}")")")"
-exec python3 "$CHECKOUT/src/agent_board.py" "$@"
+exec python3 -B "$CHECKOUT/src/agent_board.py" "$@"

@@ -1,0 +1,3 @@
+{"hooks": [{"type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.agent-board/claude-hook.sh\"",
+            "timeout": 15}]}
