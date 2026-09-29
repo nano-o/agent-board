@@ -1,5 +1,10 @@
 # Coordination board: implementation handoff
 
+> Historical. Written for the Isabelle tooling's `coordination-board` branch
+> before the board became agent-board; paths, names and the migration it
+> mentions are those of that time. See [the design](../design.md) for the
+> current board.
+
 Status: implementation completed on 2026-09-17. The implementation and
 validation record are included in this commit. No live board was migrated,
 and no branch was merged or published.
