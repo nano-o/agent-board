@@ -1,26 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# board.sh on a temporary repository with a linked worktree: resolution,
+# agent-board on a temporary repository with a linked worktree: resolution,
 # presence, claims, the guard, the pre-commit hook, staleness, posts and the
-# digest cursor. Real git, no Isabelle.
+# digest cursor. Real git.
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=test_lib.sh disable=SC1091
 source "$TEST_DIR/test_lib.sh"
 
-BOARD="$TEST_DIR/../scripts/board.sh"
-unset ISABELLE_BOARD_DIR ISABELLE_BOARD_AGENT ISABELLE_BOARD_STALE_MINUTES
-export HOME="$TEST_TMP_DIR/home"
-export GIT_CONFIG_NOSYSTEM=1
-export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid
-export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid
-mkdir -p "$HOME"
+BOARD="$TEST_DIR/../bin/agent-board"
+unset AGENT_BOARD_DIR AGENT_BOARD_AGENT AGENT_BOARD_STALE_MINUTES AGENT_BOARD_COMMAND
 
-REPO="$PROJECT"
+REPO="$TEST_TMP_DIR/project"
+mkdir -p "$REPO/src/lib"
+printf 'main\n' >"$REPO/src/main.txt"
 git -C "$REPO" init -q -b main
 git -C "$REPO" add -A
-git -C "$REPO" commit -q -m "descriptor and session"
+git -C "$REPO" commit -q -m "source"
 printf 'plan\n' >"$REPO/PLAN.md"
 git -C "$REPO" add PLAN.md
 git -C "$REPO" commit -q -m plan
@@ -29,7 +26,7 @@ git -C "$REPO" worktree add -q -b feature "$WT"
 
 board_main() { (cd "$REPO" && "$BOARD" "$@"); }
 board_wt() { (cd "$WT" && "$BOARD" "$@"); }
-board_main_env() { (cd "$REPO" && ISABELLE_BOARD_AGENT="$1" "$BOARD" "${@:2}"); }
+board_main_env() { (cd "$REPO" && AGENT_BOARD_AGENT="$1" "$BOARD" "${@:2}"); }
 post_stdin() { printf 'line one\nline two\n' | (cd "$WT" && "$BOARD" --as wt post -); }
 assert_silent() {
   [[ ! -s "$TEST_TMP_DIR/$1.out" ]] || { echo "FAIL: $1: expected no output" >&2; cat "$TEST_TMP_DIR/$1.out" >&2; exit 1; }
@@ -43,14 +40,14 @@ assert_output_lacks() {
 
 # --- resolution ---------------------------------------------------------------------
 
-BOARD_DIR="$REPO/.git/isabelle-tooling/board"
+BOARD_DIR="$REPO/.git/agent-board"
 [[ "$(board_main path)" == "$BOARD_DIR" ]] || fail "path from main: $(board_main path)"
 [[ "$(board_wt path)" == "$BOARD_DIR" ]] || fail "path from worktree differs: $(board_wt path)"
 [[ "$("$BOARD" --project-root "$WT" path)" == "$BOARD_DIR" ]] || fail "path with --project-root"
 run_and_capture 2 nogit "$BOARD" --project-root "$HOME" path
 assert_output_contains nogit "not inside a Git worktree"
-run_and_capture 0 envdir env ISABELLE_BOARD_DIR="$TEST_TMP_DIR/board2" "$BOARD" --project-root "$HOME" --as x hello --task t
-[[ -f "$TEST_TMP_DIR/board2/agents/x" ]] || fail "ISABELLE_BOARD_DIR not honoured"
+run_and_capture 0 envdir env AGENT_BOARD_DIR="$TEST_TMP_DIR/board2" "$BOARD" --project-root "$HOME" --as x hello --task t
+[[ -f "$TEST_TMP_DIR/board2/agents/x" ]] || fail "AGENT_BOARD_DIR not honoured"
 
 # --- no board yet: read-only actions and the guard are silent successes ------------
 
@@ -60,7 +57,7 @@ run_and_capture 0 digest_empty board_main digest --cursor c0
 assert_silent digest_empty
 run_and_capture 0 guard_empty board_wt guard --staged
 assert_silent guard_empty
-run_and_capture 0 ifboard board_main --if-board --as ic2 post --kind server "server starting"
+run_and_capture 0 ifboard board_main --if-board --as tool post --kind note "tool starting"
 assert_silent ifboard
 [[ ! -d "$BOARD_DIR" ]] || fail "--if-board must not create the board"
 
@@ -81,9 +78,9 @@ assert_output_contains who "feature work"
 
 # --- claims -------------------------------------------------------------------------
 
-run_and_capture 0 claim_main board_main --as main claim --reason "milestone rewrite" PLAN.md formal refs/heads/feature 'PLAN.md#status'
+run_and_capture 0 claim_main board_main --as main claim --reason "milestone rewrite" PLAN.md src refs/heads/feature 'PLAN.md#status'
 assert_output_contains claim_main "claimed PLAN.md"
-assert_output_contains claim_main "claimed formal/"
+assert_output_contains claim_main "claimed src/"
 assert_output_contains claim_main "claimed refs/heads/feature"
 assert_output_contains claim_main "claimed PLAN.md#status"
 run_and_capture 1 claim_wt board_wt --as wt claim --reason mine PLAN.md
@@ -102,9 +99,9 @@ assert_output_contains release_foreign "held by main, not by you"
 
 # --- guard on explicit paths --------------------------------------------------------
 
-run_and_capture 1 guard_nested board_wt --as wt guard formal/Test/X.thy
-assert_output_contains guard_nested "refusing: formal/ is claimed by main"
-run_and_capture 0 guard_own board_main --as main guard PLAN.md formal/Test/X.thy
+run_and_capture 1 guard_nested board_wt --as wt guard src/lib/x.txt
+assert_output_contains guard_nested "refusing: src/ is claimed by main"
+run_and_capture 0 guard_own board_main --as main guard PLAN.md src/lib/x.txt
 assert_silent guard_own
 run_and_capture 0 guard_unrelated board_wt --as wt guard README.md
 assert_silent guard_unrelated
@@ -171,16 +168,16 @@ assert_output_contains uninstall3 "no board hook installed"
 
 touch -d '-4 hours' "$BOARD_DIR/agents/main"
 run_and_capture 0 claims_stale board_main claims
-assert_output_contains claims_stale "formal/  held by main"
+assert_output_contains claims_stale "src/  held by main"
 assert_output_contains claims_stale "[stale]"
-run_and_capture 0 guard_stale board_wt --as wt guard formal/Test/X.thy
-assert_output_contains guard_stale "ignoring stale claim on formal/ by main"
-run_and_capture 0 takeover board_wt --as wt claim --reason "taking over" formal
-assert_output_contains takeover "took over formal/ from main (stale"
-run_and_capture 1 claim_active board_main --as main claim --reason back formal
-assert_output_contains claim_active "HELD: formal/ is held by wt"
-run_and_capture 0 claim_force board_main --as main claim --force --reason back formal
-assert_output_contains claim_force "took over formal/ from wt (forced)"
+run_and_capture 0 guard_stale board_wt --as wt guard src/lib/x.txt
+assert_output_contains guard_stale "ignoring stale claim on src/ by main"
+run_and_capture 0 takeover board_wt --as wt claim --reason "taking over" src
+assert_output_contains takeover "took over src/ from main (stale"
+run_and_capture 1 claim_active board_main --as main claim --reason back src
+assert_output_contains claim_active "HELD: src/ is held by wt"
+run_and_capture 0 claim_force board_main --as main claim --force --reason back src
+assert_output_contains claim_force "took over src/ from wt (forced)"
 run_and_capture 0 claims_fresh board_main claims
 assert_output_lacks claims_fresh "[stale]"
 
@@ -218,7 +215,7 @@ assert_output_contains digest_badcursor "invalid cursor"
 # --- bye ----------------------------------------------------------------------------
 
 run_and_capture 0 bye_main board_main --as main bye "done for today"
-assert_output_contains bye_main "formal/"
+assert_output_contains bye_main "src/"
 assert_output_contains bye_main "PLAN.md#status"
 run_and_capture 0 who_after board_main who
 assert_output_lacks who_after "  main  "
@@ -232,4 +229,4 @@ assert_output_lacks claims_after "held by main"
 [[ -z "$(git -C "$REPO" status --porcelain --untracked-files=all | grep -v '^ M PLAN.md$' || true)" ]] || fail "unexpected files in the main worktree: $(git -C "$REPO" status --porcelain)"
 [[ -z "$(git -C "$WT" status --porcelain --untracked-files=all)" ]] || fail "unexpected files in the linked worktree: $(git -C "$WT" status --porcelain)"
 
-echo "board.sh tests passed"
+echo "agent-board CLI tests passed"

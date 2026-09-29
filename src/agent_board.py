@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Local coordination board. All authoritative decisions use the stable flock.
 
-board.sh is the public entry point. Only stdlib and Git are required. Output
-and stdin delivery happen outside the lock; a digest acknowledges after flush.
+bin/agent-board is the public entry point. Only stdlib and Git are required.
+Output and stdin delivery happen outside the lock; a digest acknowledges after
+flush.
 """
 import argparse
 from contextlib import contextmanager
@@ -18,8 +19,14 @@ import sys
 import tempfile
 import time
 
-VERSION = 2
-MARKER = 'isabelle-tooling board guard'
+if sys.version_info < (3, 9):
+    sys.exit('agent-board: needs Python 3.9 or later')
+
+VERSION = 2  # the on-disk state format
+INTERFACE = 1  # verbs, options, exit codes, environment, machine output
+CAPABILITIES = []  # additive features beyond the interface
+MARKER = '# agent-board guard: remove with agent-board uninstall-hook.'
+EXECUTABLE = Path(__file__).resolve().parents[1] / 'bin' / 'agent-board'
 HANDLE = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}\Z')
 CURSOR = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,80}\Z')
 KIND = re.compile(r'[a-z][a-z-]{0,23}\Z')
@@ -80,7 +87,7 @@ def resource(raw, start, root):
         if not normalized:
             raise BoardError(f'invalid ref: {raw}')
         return dict(type='ref', name=normalized, directory=False, fragment=fragment)
-    if raw == 'jedit' or raw.startswith('token:'):
+    if raw.startswith('token:'):
         name = raw.removeprefix('token:')
         if not HANDLE.fullmatch(name):
             raise BoardError(f'invalid token: {name}')
@@ -105,12 +112,12 @@ def resource(raw, start, root):
 def label(res):
     if res['type'] == 'path':
         text = res['name'] or '.'
-        if text == 'jedit' or text.startswith(('refs/', 'token:', 'path:')):
+        if text.startswith(('refs/', 'token:', 'path:')):
             text = 'path:' + text
         if res['directory']:
             text += '/'
     elif res['type'] == 'token':
-        text = 'jedit' if res['name'] == 'jedit' else 'token:' + res['name']
+        text = 'token:' + res['name']
     else:
         text = res['name']
     return text + ('#' + res['fragment'] if res['fragment'] is not None else '')
@@ -138,10 +145,11 @@ class Board:
         self.state = None
 
     def exists(self):
-        return any((self.path / name).exists() for name in ('posts', 'state.json', 'format'))
+        # Any entry besides the lock inode means a board, complete or not.
+        return self.path.is_dir() and any(e.name != '.lock' for e in self.path.iterdir())
 
     @contextmanager
-    def locked(self, *, create=False, migrate=False):
+    def locked(self, *, create=False):
         if create:
             self.path.mkdir(parents=True, exist_ok=True)
         # This inode is stable for the life of the board. Never unlink it.
@@ -150,21 +158,20 @@ class Board:
             try:
                 state = self.path / 'state.json'
                 if state.exists():
-                    self.state = json.loads(state.read_text())
+                    try:
+                        self.state = json.loads(state.read_text())
+                    except ValueError as exc:
+                        raise BoardError(f'malformed authoritative board state; repair from backup: {exc}') from exc
                     self.validate()
+                elif self.exists():
+                    # Never repaired or restarted automatically: what remains may be real state.
+                    raise BoardError(f'incomplete board state at {self.path}: state.json is missing. '
+                                     'Restore it from a backup with clients stopped, or remove the '
+                                     'directory if the board held nothing worth keeping')
                 else:
-                    if (self.path / 'format').exists():
-                        raise BoardError('missing authoritative state.json; restore from backup with clients stopped')
-                    legacy = any((self.path / folder).exists() and
-                                 any(p for p in (self.path / folder).iterdir() if not p.name.startswith('.'))
-                                 for folder in ('agents', 'posts', 'claims', 'cursors'))
-                    if legacy and not migrate:
-                        raise BoardError('legacy board: stop all old writers, then run migrate --writers-stopped')
                     for folder in ('agents', 'posts', 'messages', 'cursors-v2'):
                         (self.path / folder).mkdir(exist_ok=True)
                     self.state = dict(version=VERSION, claims=[], sequence=0)
-                    if legacy:
-                        self.migrate_legacy()
                     self.save()
                 marker = self.path / 'format'
                 if marker.exists() and marker.read_text() != f'{VERSION}\n':
@@ -217,30 +224,6 @@ class Board:
 
     def save(self):
         atomic_write(self.path / 'state.json', json.dumps(self.state, indent=2) + '\n')
-
-    def migrate_legacy(self):
-        # The old files remain intact for inspection. The final state rename is
-        # the activation point; interrupted migration is safe to repeat.
-        recovered = []
-        claims = self.path / 'claims'
-        for entry in sorted(claims.iterdir() if claims.exists() else []):
-            if entry.name.startswith('.'):
-                continue
-            try:
-                values = {key: (entry / key).read_text().strip()
-                          for key in ('resource', 'owner', 'reason', 'since')}
-                if not all(values.values()) or not HANDLE.fullmatch(values['owner']):
-                    raise ValueError('incomplete or invalid fields')
-                raw = '.' if values['resource'] == '/' else values['resource']
-                values['resource'] = resource(raw, str(self.root), self.root)
-                self.state['claims'].append(values)
-            except (OSError, ValueError, BoardError) as exc:
-                recovered.append(f'{entry.name}: {exc}')
-        for number, post in enumerate(sorted((self.path / 'posts').glob('*.md')), 1):
-            atomic_write(self.path / 'messages' / f'{number:020d}.md', post.read_text())
-            self.state['sequence'] = number
-        self.state['migration'] = dict(time=now(), recovered=recovered,
-                                      cursors='legacy cursors replayed from beginning')
 
     def agents(self):
         result = {}
@@ -367,18 +350,18 @@ class Board:
                 continue
             res = label(c['resource'])
             if c['resource']['fragment'] is not None:
-                messages += f"board: note: {c['owner']} holds a passage of {label(target)} ({c['resource']['fragment']}): {c['reason']}\n"
+                messages += f"agent-board: note: {c['owner']} holds a passage of {label(target)} ({c['resource']['fragment']}): {c['reason']}\n"
             elif self.stale(c['owner'], agents):
-                messages += f"board: ignoring stale claim on {res} by {c['owner']}\n"
+                messages += f"agent-board: ignoring stale claim on {res} by {c['owner']}\n"
             else:
-                messages += f"board: refusing: {res} is claimed by {c['owner']} since {c['since']}: {c['reason']}\n"
+                messages += f"agent-board: refusing: {res} is claimed by {c['owner']} since {c['since']}: {c['reason']}\n"
                 blocked = True
         if blocked:
             if not handle:
-                messages += 'board: your handle is unknown; set ISABELLE_BOARD_AGENT or pass --as\n'
+                messages += 'agent-board: your handle is unknown; set AGENT_BOARD_AGENT or pass --as\n'
             elif inferred:
-                messages += f'board: you are taken to be {handle}, the agent registered for this worktree\n'
-            messages += 'board: wait for release or coordinate with a post. Ref rejection may leave index/worktree changes; inspect them before continuing.\n'
+                messages += f'agent-board: you are taken to be {handle}, the agent registered for this worktree\n'
+            messages += 'agent-board: wait for release or coordinate with a post. Ref rejection may leave index/worktree changes; inspect them before continuing.\n'
         return int(blocked), messages
 
 
@@ -394,15 +377,15 @@ def render_posts(posts):
 
 
 def parser():
-    p = argparse.ArgumentParser(description='Repository coordination board: presence, posts and atomic leases.',
+    p = argparse.ArgumentParser(prog='agent-board', description='Repository coordination board: presence, posts and atomic leases.',
         epilog='Paths are relative to the invocation directory (or --project-root). Use the worktree root for whole-worktree coverage, '
-        'trailing / for directories, refs/heads/NAME, jedit or token:NAME, path:NAME to disambiguate, '
-        'and path#fragment for advisory passages. Leases expire after ISABELLE_BOARD_STALE_MINUTES (180). '
+        'trailing / for directories, refs/heads/NAME, token:NAME, path:NAME to disambiguate, '
+        'and path#fragment for advisory passages. Leases expire after AGENT_BOARD_STALE_MINUTES (180). '
         'Explicit valid handles renew existing presence after argument validation, even on conflicts; '
         'anonymous observers do not. Git guards infer and renew a unique active worktree owner. '
         'Hooks guard commits and prepared ref transactions; edits and branch rename destinations need cooperative guards.')
     p.add_argument('--project-root')
-    p.add_argument('--as', dest='handle', default=os.environ.get('ISABELLE_BOARD_AGENT', ''))
+    p.add_argument('--as', dest='handle', default=os.environ.get('AGENT_BOARD_AGENT', ''))
     p.add_argument('--if-board', action='store_true')
     sub = p.add_subparsers(dest='action', required=True)
     for name in ('path', 'who', 'claims', 'uninstall-hook'):
@@ -418,14 +401,14 @@ def parser():
     q = sub.add_parser('guard'); q.add_argument('--staged', action='store_true'); q.add_argument('resources', nargs='*')
     q = sub.add_parser('guard-refs', help='Internal reference-transaction guard; reads full stdin before locking'); q.add_argument('state')
     q = sub.add_parser('install-hook', help='Install pre-commit and reference-transaction hooks'); q.add_argument('--force', action='store_true')
-    q = sub.add_parser('migrate', help='Upgrade a legacy board, retaining old files and replaying cursors'); q.add_argument('--writers-stopped', action='store_true')
+    q = sub.add_parser('version', help='Print the interface, state format, capabilities and executable'); q.add_argument('--json', action='store_true')
     return p
 
 
-def hook_text(name):
-    cli = shlex.quote(str(Path(__file__).with_name('board.sh').resolve()))
+def hook_text(name, executable=EXECUTABLE):
+    cli = shlex.quote(str(executable))
     preamble = f'''#!/usr/bin/env bash
-# {MARKER}: remove with board.sh uninstall-hook.
+{MARKER}
 hook_dir="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd -P)"
 '''
     if name == 'pre-commit':
@@ -446,12 +429,23 @@ fi
 '''
 
 
+def owned(path):
+    # The marker line identifies a guard; any other hook is foreign.
+    if not path.is_file():
+        return False
+    lines = path.read_text(errors='replace').splitlines()
+    return len(lines) > 1 and lines[1] == MARKER
+
+
 def hooks(root, action, force=False):
     directory = Path(git(root, 'rev-parse', '--path-format=absolute', '--git-path', 'hooks'))
+    common = Path(git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir')).resolve()
+    # Never touch a shared, global or tracked hooks directory (core.hooksPath).
+    if common not in directory.resolve().parents:
+        raise BoardError(f'the hooks directory {directory} lies outside the Git common directory {common}; '
+                         'agent-board changes only the repository\'s own hooks')
     directory.mkdir(parents=True, exist_ok=True)
     names = ('pre-commit', 'reference-transaction')
-    def owned(path):
-        return path.exists() and MARKER in path.read_text()
     # Preflight both hooks before moving either one.
     if action == 'install-hook':
         for name in names:
@@ -462,15 +456,33 @@ def hooks(root, action, force=False):
                 if path.with_name(name + '.pre-board').exists():
                     raise BoardError(f'cannot chain: {name}.pre-board already exists')
     output = ''
+    if action == 'install-hook':
+        # Both guards or neither: undo the first if the second cannot be written.
+        done = []
+        try:
+            for name in names:
+                path, backup = directory / name, directory / (name + '.pre-board')
+                chained = path.exists() and not owned(path)
+                previous = path.read_text() if owned(path) else None
+                if chained:
+                    path.rename(backup)
+                    output += f'chained the previous hook as {backup}\n'
+                done.append((path, backup, chained, previous))
+                atomic_write(path, hook_text(name), 0o755)
+                output += f'installed {path}\n'
+        except BaseException:
+            for path, backup, chained, previous in reversed(done):
+                if chained:
+                    backup.replace(path)
+                elif previous is not None:
+                    atomic_write(path, previous, 0o755)
+                else:
+                    path.unlink(missing_ok=True)
+            raise
+        return output
     for name in names:
         path, backup = directory / name, directory / (name + '.pre-board')
-        if action == 'install-hook':
-            if path.exists() and not owned(path):
-                path.rename(backup)
-                output += f'chained the previous hook as {backup}\n'
-            atomic_write(path, hook_text(name), 0o755)
-            output += f'installed {path}\n'
-        elif owned(path):
+        if owned(path):
             if backup.exists():
                 backup.replace(path)
                 output += f'removed the board hook and restored the previous {path}\n'
@@ -482,8 +494,39 @@ def hooks(root, action, force=False):
     return output
 
 
+def checkout_git(*args):
+    # Ignore the calling repository's variables, e.g. GIT_DIR inside a hook.
+    env = {k: v for k, v in os.environ.items() if k not in (
+        'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR',
+        'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE')}
+    result = subprocess.run(['git', '-C', str(EXECUTABLE.parents[1]), *args], capture_output=True, env=env)
+    return result.returncode, result.stdout.decode(errors='surrogateescape').rstrip('\n')
+
+
+def version(as_json):
+    checkout = EXECUTABLE.parents[1]
+    commit = clean = None
+    code, top = checkout_git('rev-parse', '--show-toplevel')
+    # Only a checkout of agent-board itself has a commit, not a copy inside another repository.
+    if not code and Path(top).resolve() == checkout:
+        code, head = checkout_git('rev-parse', '--verify', '-q', 'HEAD')
+        if not code:
+            code, status = checkout_git('status', '--porcelain', '--ignore-submodules=none')
+            if code:
+                raise BoardError(f'git status failed in {checkout}')
+            commit, clean = head, not status
+    if as_json:
+        return json.dumps(dict(interface=INTERFACE, state_format=VERSION, capabilities=CAPABILITIES,
+                               commit=commit, clean=clean, executable=str(EXECUTABLE))) + '\n'
+    where = f"commit {commit} ({'clean' if clean else 'modified'})" if commit else 'not a Git checkout'
+    return (f"agent-board interface {INTERFACE}, state format {VERSION}, "
+            f"capabilities: {' '.join(CAPABILITIES) or 'none'}; {where}; executable {EXECUTABLE}\n")
+
+
 def execute(args):
     action, handle = args.action, args.handle
+    if action == 'version':
+        return 0, version(args.json), '', None
     if handle and not HANDLE.fullmatch(handle):
         raise BoardError(f'invalid handle: {handle}')
     start = Path(args.project_root or os.getcwd()).resolve()
@@ -492,20 +535,20 @@ def execute(args):
     top = git(start, 'rev-parse', '--show-toplevel', optional=True)
     common = git(start, 'rev-parse', '--path-format=absolute', '--git-common-dir', optional=True)
     root = Path(top) if top else start
-    override = os.environ.get('ISABELLE_BOARD_DIR', '')
+    override = os.environ.get('AGENT_BOARD_DIR', '')
     if not override and not common:
-        raise BoardError(f'not inside a Git worktree: {start}; pass --project-root or set ISABELLE_BOARD_DIR')
-    path = Path(override) if override else Path(common) / 'isabelle-tooling/board'
-    stale_minutes = os.environ.get('ISABELLE_BOARD_STALE_MINUTES', '180')
+        raise BoardError(f'not inside a Git worktree: {start}; pass --project-root or set AGENT_BOARD_DIR')
+    path = Path(override) if override else Path(common) / 'agent-board'
+    stale_minutes = os.environ.get('AGENT_BOARD_STALE_MINUTES', '180')
     if not re.fullmatch('[0-9]+', stale_minutes):
-        raise BoardError('ISABELLE_BOARD_STALE_MINUTES must be a non-negative integer')
+        raise BoardError('AGENT_BOARD_STALE_MINUTES must be a non-negative integer')
     board = Board(path, root, int(stale_minutes))
     if action in ('install-hook', 'uninstall-hook'):
         if not common:
             raise BoardError('hook installation needs a Git repository')
         return 0, hooks(root, action, getattr(args, 'force', False)), '', None
     if action in ('hello', 'bye', 'post', 'claim', 'release') and not handle:
-        raise BoardError('this action needs an agent handle: --as HANDLE or ISABELLE_BOARD_AGENT')
+        raise BoardError('this action needs an agent handle: --as HANDLE or AGENT_BOARD_AGENT')
     # Argument/path/stdin validation is deliberately before locking or renewal.
     resources = [resource(r, str(start), root) for r in getattr(args, 'resources', [])]
     message = ' '.join(getattr(args, 'message', []))
@@ -532,8 +575,6 @@ def execute(args):
         args.cursor = args.cursor or handle
         if not args.cursor or not CURSOR.fullmatch(args.cursor):
             raise BoardError('invalid cursor name: use --cursor NAME or an agent handle')
-    if action == 'migrate' and not args.writers_stopped:
-        raise BoardError('stop ALL old board writers, then pass migrate --writers-stopped')
     if action == 'guard-refs':
         lines = sys.stdin.read().splitlines()
         if args.state != 'prepared':
@@ -552,7 +593,7 @@ def execute(args):
         ref = git(root, 'symbolic-ref', '-q', 'HEAD', optional=True)
         if ref:
             resources.append(resource(ref, str(root), root))
-    create = action in ('hello', 'post', 'claim', 'migrate')
+    create = action in ('hello', 'post', 'claim')
     if not board.exists():
         if args.if_board:
             return 0, '', '', None
@@ -569,12 +610,12 @@ def execute(args):
         raise BoardError(f'--worktree: not a directory: {worktree}')
     branch = git(worktree, 'symbolic-ref', '-q', '--short', 'HEAD', optional=True) or 'detached'
     out, err, code, ack = '', '', 0, None
-    with board.locked(create=create, migrate=action == 'migrate'):
+    with board.locked(create=create):
         agents = board.agents()
         inferred = action in ('guard', 'guard-refs') and not handle
         if inferred:
             handle = board.infer(agents)
-        if action not in ('bye', 'migrate'):
+        if action != 'bye':
             board.renew(handle)
         if action == 'hello' or action == 'claim' and handle not in agents:
             board.presence(handle, worktree, branch, args.task if action == 'hello' else '(no task recorded; use hello --task)')
@@ -625,10 +666,6 @@ def execute(args):
                         out += '\nPosts\n' + render_posts(selected)
                 if args.mark and selected:
                     ack = (board, args.cursor, selected[-1][0])
-        elif action == 'migrate':
-            out = f'board format {VERSION}; legacy posts and ownership retained; legacy cursors replay from beginning\n'
-            for entry in board.state.get('migration', {}).get('recovered', []):
-                out += f'recovered incomplete legacy claim (retired; original retained): {entry}\n'
     return code, out, err, ack
 
 
@@ -643,7 +680,7 @@ def main():
             ack[0].acknowledge(ack[1], ack[2])
         return code
     except (BoardError, OSError, ValueError) as exc:
-        print(f'board: {exc}', file=sys.stderr)
+        print(f'agent-board: {exc}', file=sys.stderr)
         return 2
 
 
