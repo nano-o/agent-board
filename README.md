@@ -91,8 +91,9 @@ bounded: at most 20 posts at a time, never skipping an unread one.
 
 Everything in `docs/project-integration.md` is built: the board, its
 guards, `version`, the Claude hook, the project operations and `doctor`.
-It has not yet been through the new-project fixtures, so there is no
-`stable` branch: until there is, pass `--revision` to `init`.
+It has been through the new-project fixtures on Claude Code and Codex CLI;
+`stable` names the validated commit, and `docs/validation.md` records each
+validation.
 
 ## Provenance and license
 
