@@ -486,13 +486,17 @@ def parser():
     q = sub.add_parser('guard-refs', help='Internal reference-transaction guard; reads full stdin before locking'); q.add_argument('state')
     q = sub.add_parser('install-hook', help='Install pre-commit and reference-transaction hooks'); q.add_argument('--force', action='store_true')
     q = sub.add_parser('version', help='Print the interface, state format, capabilities and executable'); q.add_argument('--json', action='store_true')
-    q = sub.add_parser('init', help='Install the project files, pinned at --revision (default stable)'); q.add_argument('--revision', default='stable')
-    q = sub.add_parser('sync', help='Reinstall the pinned project files; --link symlinks the skill to --source; --check only checks')
+    # The project verbs also take --project-root after the verb, as the contracts write them.
+    project = argparse.ArgumentParser(add_help=False)
+    project.add_argument('--project-root', default=argparse.SUPPRESS)
+    q = sub.add_parser('init', parents=[project], help='Install the project files, pinned at --revision (default stable)')
+    q.add_argument('--revision', default='stable')
+    q = sub.add_parser('sync', parents=[project], help='Reinstall the pinned project files; --link symlinks the skill to --source; --check only checks')
     q.add_argument('--link', action='store_true'); q.add_argument('--source'); q.add_argument('--check', action='store_true')
     q.add_argument('--allow-dirty', action='store_true', help='with --check: link mode is a note, not a failure')
-    q = sub.add_parser('update', help='Pin REV and install its project files'); q.add_argument('revision', metavar='REV')
-    sub.add_parser('remove', help='Remove the unchanged project files, the inventory and agent-board.conf')
-    q = sub.add_parser('doctor', help='Read-only check of the executable, project files, storage and Git guards')
+    q = sub.add_parser('update', parents=[project], help='Pin REV and install its project files'); q.add_argument('revision', metavar='REV')
+    sub.add_parser('remove', parents=[project], help='Remove the unchanged project files, the inventory and agent-board.conf')
+    q = sub.add_parser('doctor', parents=[project], help='Read-only check of the executable, project files, storage and Git guards')
     q.add_argument('--allow-dirty', action='store_true'); q.add_argument('--json', action='store_true')
     return p
 

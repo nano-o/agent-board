@@ -543,6 +543,17 @@ class ProjectTests(unittest.TestCase):
             self.assertEqual({k for k in old if old[k] != new[k]}, set())
         self.assertEqual(status(), before_status)
 
+    def test_project_root_after_the_verb(self):
+        """Isabelle doctor runs `doctor --json --project-root ROOT` from anywhere."""
+        elsewhere = self.work / 'elsewhere'
+        elsewhere.mkdir()
+        self.ab('init', '--project-root', str(self.project), cwd=elsewhere)
+        self.commit_all()
+        result = self.ab('doctor', '--json', '--project-root', str(self.project), cwd=elsewhere)
+        self.assertTrue(json.loads(result.stdout)['ok'])
+        self.ab('--project-root', str(self.project), 'sync', '--check', cwd=elsewhere)
+        self.ab('sync', '--check', '--project-root', str(self.project), cwd=elsewhere)
+
     def test_doctor_that_cannot_run_still_prints_an_object(self):
         outside = self.work / 'not-a-repository'
         outside.mkdir()
