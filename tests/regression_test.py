@@ -507,6 +507,21 @@ sys.exit(board.main())
         self.stale('alice')
         self.git('update-ref', '-d', 'refs/heads/protected', base, agent='bob')
 
+    def test_worktree_add_of_own_claimed_branch_and_unchanged_refs(self):
+        base = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.b('install-hook')
+        self.claim('alice', 'refs/heads/proof')
+        wt = self.base / 'proof'
+        self.assertNotEqual(self.git('worktree', 'add', '-b', 'proof', wt, agent='bob', check=False).returncode, 0)
+        self.assertNotEqual(self.git('rev-parse', '--verify', 'refs/heads/proof', check=False).returncode, 0)
+        # The owner is inferred in its own worktree; the new worktree's
+        # checkout reports the branch unchanged, with nobody registered there.
+        self.git('worktree', 'add', '-b', 'proof', wt)
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=wt).stdout.strip(), base)
+        self.git('update-ref', 'refs/heads/proof', base, base, agent='bob')
+        self.assertNotEqual(self.git('update-ref', '-d', 'refs/heads/proof', agent='bob', check=False).returncode, 0)
+        self.assertEqual(self.git('rev-parse', 'refs/heads/proof').stdout.strip(), base)
+
     def test_branch_rename_source_and_destination_boundary(self):
         self.b('install-hook')
         self.git('branch', 'source')
@@ -553,7 +568,8 @@ sys.exit(int(os.environ.get('FOREIGN_STATUS', '0')))
         self.b('install-hook')
         self.claim('alice', 'refs/heads/protected')
         base = self.git('rev-parse', 'HEAD').stdout.strip()
-        stdin = f'{base} {base} refs/heads/unrelated\n{base} {base} refs/heads/protected\n'
+        zero = '0' * len(base)
+        stdin = f'{zero} {base} refs/heads/unrelated\n{zero} {base} refs/heads/protected\n'
         self.assertEqual(self.run_cmd([ref_hook, 'prepared'], input=stdin, agent='bob', check=False).returncode, 1)
         self.assertEqual((self.base / 'foreign-stdin').read_text(), stdin)
         self.assertEqual((self.base / 'foreign-args').read_text(), 'prepared')

@@ -865,7 +865,13 @@ def execute(args):
             parts = line.split()
             if len(parts) != 3:
                 raise BoardError('malformed reference transaction')
-            ref = parts[2]
+            old, new, ref = parts
+            # An update that leaves a ref as it was changes nothing. Checking
+            # out a new linked worktree reports its branch this way, from a
+            # worktree where no agent is registered yet. An all-zero old
+            # value means "not verified", so an unverified delete is checked.
+            if old == new and old.strip('0'):
+                continue
             if ref.startswith('refs/'):
                 resources.append(resource(ref, str(root), root))
             # HEAD is per-worktree, not a shared branch resource.

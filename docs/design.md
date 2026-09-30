@@ -183,7 +183,11 @@ resolved real path, recorded at installation:
   shared ref in the `prepared` phase. This covers ordinary fast-forward
   merges, resets, rebases, direct `update-ref`, branch creation/deletion, and
   multiple-ref transactions. The same owner, inference and staleness rules
-  apply. Per-worktree `HEAD` is not a shared branch claim.
+  apply. Per-worktree `HEAD` is not a shared branch claim. An update whose
+  old and new values are equal leaves the ref as it was and is not checked:
+  `git worktree add -b` reports the new branch that way from the new
+  worktree, where nobody is registered yet. An all-zero old value means
+  "not verified", so an unverified deletion is still checked.
 
 Each guard's second line is exactly `# agent-board guard: remove with
 agent-board uninstall-hook.`; a hook without that line is foreign, including
