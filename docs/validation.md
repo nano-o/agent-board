@@ -97,3 +97,35 @@ Observations
   6. Claude Code's created the worktree before the branch was claimed,
   and its worker then claimed it; Codex's set `AGENT_BOARD_AGENT` on
   `git worktree add`. The regression test covers that path.
+
+## 2026-10-01: the Apache 2.0 license, and no machine paths in the docs
+
+Candidates
+: agent-board `bc84193`, this commit's parent: the Apache License 2.0 as
+  `LICENSE`, a `NOTICE` naming Giuliano Losa as copyright holder, a quick
+  start that clones from GitHub, and the docs without local paths or the
+  names of private projects.
+: isabelle-formal-modeling-tooling `cabf405`, the same license and
+  documentation change, with its own copyright holder; see that
+  repository's `docs/validation.md`.
+
+Hosts
+: None: no host session ran, because nothing a host loads changed.
+: Isabelle2025-2, Git 2.43, Python 3.12.3, on Linux.
+
+Setup
+: The tooling's fixture environment, with this checkout's executable in
+  `AGENT_BOARD_COMMAND` and on `PATH`. The stellar-core clone is now a
+  clone of public stellar-core `release/v29.0.0`, pinned at both
+  candidates.
+
+Passed
+: `make validate`.
+: The tooling's mechanical checks: 76 on the bare repository and 75 on
+  the stellar-core clone, all but the check of `init` at the previous
+  `stable`, whose doctors fail while the runtimes are at the candidates.
+
+Not rerun
+: The behavioural scenarios, link mode and the worker smoke proof: only
+  `LICENSE`, `NOTICE`, the README, `PROVENANCE.md` and the docs changed,
+  and not the skill, the hook, the guards or the link code.
