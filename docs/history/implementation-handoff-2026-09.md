@@ -36,7 +36,7 @@ Fix the eight findings from the coordination-board review using the plan
 below. Use an ordinary coding agent; this is shell tooling and documentation
 work, not an `ic2-prover` proof assignment.
 
-- Worktree: `/home/nano/Documents/isabelle-formal-modeling-tooling-board`
+- Worktree: a linked worktree of the tooling repository
 - Branch: `coordination-board`
 - Reviewed commit: `7849d3d7f2f60efa656501c7d0aaa005bbf526ae`
 - Base branch: `main`, at `8650e8b` when reviewed

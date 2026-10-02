@@ -25,8 +25,8 @@ Hosts
 Setup
 : Fresh host configuration roots; the board executable from this
   checkout, on `PATH` and in `AGENT_BOARD_COMMAND`.
-: Fixtures: a bare `git init` repository and a clone of
-  stellar-core-internal, with and without the Isabelle tooling.
+: Fixtures: a bare `git init` repository and a stellar-core clone, with
+  and without the Isabelle tooling.
 
 Passed
 : The board alone (init, guards, doctor, `sync --check`, hello, claim,

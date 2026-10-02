@@ -20,7 +20,8 @@ absolute path). The Claude hook, the Isabelle tooling's ic2 notes and the
 agents themselves find it that way:
 
 ```bash
-ln -s ~/Documents/agent-board/bin/agent-board ~/.local/bin/agent-board
+git clone --branch stable https://github.com/nano-o/agent-board
+ln -s "$PWD/agent-board/bin/agent-board" ~/.local/bin/agent-board
 agent-board version
 ```
 
@@ -98,4 +99,5 @@ validation.
 ## Provenance and license
 
 Extracted from the Isabelle formal-modeling tooling on 2026-09-28; see
-[PROVENANCE.md](PROVENANCE.md). No license is granted yet.
+[PROVENANCE.md](PROVENANCE.md). Copyright 2026 Giuliano Losa, licensed
+under the [Apache License, Version 2.0](LICENSE); see [NOTICE](NOTICE).

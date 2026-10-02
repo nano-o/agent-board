@@ -27,7 +27,9 @@ commits show every change made for standalone use.
 agent-board part of that repository's `docs/delivery-contracts.md` at the
 same commit.
 
-**Licenses.** The source repository has no license file and declares no
-license. Everything imported here was written for that repository, in commits
-authored by Giuliano Losa, and contains no third-party code; the board uses
-only Python's standard library and Git. No license is granted yet.
+**Licenses.** At the import the source repository had no license file and
+declared no license. Everything imported here was written for that
+repository, in commits authored by Giuliano Losa, and contains no third-party
+code; the board uses only Python's standard library and Git. Both
+repositories are now licensed under the Apache License, Version 2.0
+([LICENSE](LICENSE)).
