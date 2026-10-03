@@ -13,11 +13,13 @@ from pathlib import Path
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 
 SOURCE = Path(__file__).resolve().parents[1]
+MODULE_DIR = SOURCE / 'src'
 DRIVER = '''
 import sys
 sys.path.insert(0, sys.argv[1])
@@ -572,6 +574,112 @@ class ProjectTests(unittest.TestCase):
         out = self.ab('remove').stdout
         self.assertIn('The board data at', out)
         self.assertIn('The Git guards stay installed', out)
+
+
+class KindTests(unittest.TestCase):
+    """The shared module's project kinds, through a fake spec on a scratch runtime.
+
+    agent-board's suite has the same tests; neither component names a kind
+    in these manifests."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(MODULE_DIR))
+        sys.dont_write_bytecode = True
+        import project_files
+        cls.pf = project_files
+        cls.tmp = tempfile.TemporaryDirectory(prefix='kinds-')
+        cls.runtime = Path(cls.tmp.name)
+        cls.env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+        cls.env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_AUTHOR_NAME='test',
+                       GIT_AUTHOR_EMAIL='test@example.invalid', GIT_COMMITTER_NAME='test',
+                       GIT_COMMITTER_EMAIL='test@example.invalid')
+        cls.git('init', '-q', '-b', 'main')
+        for name in ('everywhere', 'only-x'):
+            (cls.runtime / 'skills' / name).mkdir(parents=True)
+            (cls.runtime / 'skills' / name / 'SKILL.md').write_text(f'# {name}\n')
+        (cls.runtime / 'file.txt').write_text('a file\n')
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    @classmethod
+    def git(cls, *args):
+        return subprocess.run(['git', *args], cwd=cls.runtime, env=cls.env, capture_output=True, text=True,
+                              check=True).stdout
+
+    def revision(self, kinds=None, skill_kinds=(['x'],), file_kinds=None):
+        """Commit a manifest with the skill `everywhere` (no kinds) and `only-x`; return the revision."""
+        manifest = dict(format=1, component='fake', skills=[dict(name='everywhere', source='skills/everywhere')],
+                        files=[dict(path='out/file.txt', source='file.txt')])
+        for value in skill_kinds:
+            manifest['skills'].append(dict(name='only-x', source='skills/only-x', kinds=value))
+        if kinds is not None:
+            manifest['kinds'] = kinds
+        if file_kinds is not None:
+            manifest['files'][0]['kinds'] = file_kinds
+        (self.runtime / 'manifest.json').write_text(json.dumps(manifest))
+        self.git('add', '-A')
+        self.git('commit', '-qm', 'manifest', '--allow-empty')
+        return self.git('rev-parse', 'HEAD').strip()
+
+    def spec(self, hook=True):
+        pf, runtime = self.pf, self.pf.Runtime(self.runtime)
+
+        class Spec:
+            name, manifest, descriptor = 'fake', 'manifest.json', 'fake.conf'
+
+            def __init__(self):
+                self.runtime = runtime
+
+            def substitutions(self, values):
+                return {}
+
+        class KindSpec(Spec):
+            def kind(self, values):
+                return values.get('kind')
+
+        return KindSpec() if hook else Spec()
+
+    def skills(self, revision, values, hook=True, shared=False):
+        desired = self.pf.desired_state(self.spec(hook), revision, values, shared=shared)
+        return [name for name, _ in desired.skills], sorted(desired.symlinks)
+
+    def test_without_a_kind_every_entry_is_installed(self):
+        for kinds in (None, ['x', 'y']):
+            revision = self.revision(kinds)
+            both = ['everywhere', 'only-x']
+            self.assertEqual(self.skills(revision, {}, hook=False),
+                             (both, ['.claude/skills/everywhere', '.claude/skills/only-x']))
+            self.assertEqual(self.skills(revision, {'kind': 'y'}, hook=False)[0], both)
+            self.assertEqual(self.skills(revision, {})[0], both)
+
+    def test_a_kind_selects_the_skills(self):
+        revision = self.revision(['x', 'y'])
+        self.assertEqual(self.skills(revision, {'kind': 'x'})[0], ['everywhere', 'only-x'])
+        self.assertEqual(self.skills(revision, {'kind': 'y'}), (['everywhere'], ['.claude/skills/everywhere']))
+        self.assertEqual(self.skills(revision, {'kind': 'y'}, shared=True), (['everywhere'], []))
+        desired = self.pf.desired_state(self.spec(), revision, {'kind': 'y'}, 'link', '/src')
+        self.assertEqual(sorted(desired.symlinks), ['.agents/skills/everywhere', '.claude/skills/everywhere'])
+        self.assertEqual(sorted(desired.files), ['out/file.txt'])
+
+    def test_a_kind_the_revision_does_not_support_is_refused(self):
+        for kinds, says in ((None, 'predates project kinds'), (['x'], 'it supports x')):
+            revision = self.revision(kinds)
+            with self.assertRaises(self.pf.Refused) as caught:
+                self.skills(revision, {'kind': 'y'})
+            self.assertIn('kind y', str(caught.exception))
+            self.assertIn(says, str(caught.exception))
+
+    def test_malformed_kinds_are_refused(self):
+        cases = [dict(file_kinds=['x']), dict(kinds='x'), dict(kinds=['x', '']), dict(skill_kinds=('x',)),
+                 dict(skill_kinds=([],)), dict(skill_kinds=([1],))]
+        for case in cases:
+            revision = self.revision(**dict(dict(kinds=['x']), **case))
+            for hook, values in ((True, {'kind': 'x'}), (True, {}), (False, {})):
+                with self.subTest(case=case, hook=hook, values=values), self.assertRaises(self.pf.Broken):
+                    self.skills(revision, values, hook=hook)
 
 
 if __name__ == '__main__':

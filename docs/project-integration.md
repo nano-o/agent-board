@@ -27,8 +27,8 @@ checkout containing the resolved `agent-board` executable. A *managed
 path* is one a component's inventory records.
 
 **Descriptors.** One per component at the checkout root:
-`isabelle-tooling.conf` (existing format, `format_version=1`, unchanged
-keys) and `agent-board.conf`:
+`isabelle-tooling.conf` (its existing format, `format_version=1`, with the
+keys the Isabelle tooling defines) and `agent-board.conf`:
 
 ```text
 # agent-board project descriptor. Data only: key=value, never sourced.
@@ -147,10 +147,22 @@ itself resolves to the same directory as `.agents/skills` (a project-wide
 alias), no per-skill symlinks are made and the inventory records
 `claude_skills: shared`. When `.agents`, `.claude`, `.agents/skills` or
 `.claude/skills` is a symlink resolving outside the checkout, install
-refuses. `isabelle-tooling` owns the five `isabelle-*` names its manifest
+refuses. `isabelle-tooling` owns the `isabelle-*` names its manifest
 lists and `agent-board` owns `agent-coordination`; any other directory
 there is the project's and untouched. An existing unmanaged `NAME` is a
 collision.
+
+**Project kinds.** A component may divide its projects into kinds, named
+in its descriptor; the Isabelle tooling does, agent-board does not. A
+manifest's top-level `"kinds"` lists the kinds its revision supports. A
+skill entry may carry `"kinds"`, the kinds it is installed for; a skill
+entry without it is installed for every kind, and no other entry may carry
+it. A project that names no kind gets every skill, whatever the lists say.
+For a project that names a kind, `init`, `sync`, `update` and `check`
+refuse a revision whose top-level list lacks it, including every revision
+from before kinds, and install only the skills for that kind. In
+`project_files.py` the kind comes from the spec's optional `kind(values)`
+hook, given the parsed descriptor.
 
 **Link mode.** `sync --link [--source DIR]` replaces each managed skill
 directory in `.agents/skills/` with an absolute symlink to

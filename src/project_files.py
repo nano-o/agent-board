@@ -4,8 +4,9 @@ This implements the "Shared rules" of the project-integration contracts
 (agent-board's docs/project-integration.md, the Isabelle tooling's
 docs/delivery-contracts.md): descriptors and the inventory, owned JSON
 entries, TOML and Markdown blocks, root instruction files, skill
-directories, link mode, the installer lock, index-based preflight, and
-publication that prints restore commands when a write fails.
+directories and the project kinds that select them, link mode, the
+installer lock, index-based preflight, and publication that prints restore
+commands when a write fails.
 
 Both repositories keep an identical copy of this file, agent-board as
 src/project_files.py and the tooling as scripts/project_files.py; change
@@ -169,6 +170,29 @@ def substitute(text, substitutions):
     return text
 
 
+def manifest_kinds(value, what):
+    if not isinstance(value, list) or not all(isinstance(k, str) and k for k in value):
+        raise Broken(f'manifest: invalid {what}: {value!r}')
+    return value
+
+
+def project_kind(spec, revision, values, manifest):
+    """The project's kind, which the revision must support; None when the spec or the project names none.
+
+    Only skill entries carry kinds; without a project kind every skill is installed."""
+    for key in ('files', 'json_entries', 'toml_blocks'):
+        for item in manifest.get(key, []):
+            if isinstance(item, dict) and 'kinds' in item:
+                raise Broken(f'manifest: only skill entries may carry kinds, but a {key} entry does')
+    supported = manifest_kinds(manifest.get('kinds', []), 'kinds')
+    kind = spec.kind(values) if hasattr(spec, 'kind') else None
+    if kind is not None and kind not in supported:
+        raise Refused(f'{spec.descriptor}: this project is of kind {kind}, which {spec.name} {revision} does not '
+                      'support' + (f" (it supports {', '.join(supported)})" if supported else
+                                   ' (it predates project kinds)'))
+    return kind
+
+
 class Desired:
     def __init__(self, revision, mode, link_source, shared):
         self.revision, self.mode, self.link_source, self.shared = revision, mode, link_source, shared
@@ -191,12 +215,19 @@ def desired_state(spec, revision, values, mode='copy', link_source=None, shared=
         raise Broken(f'{spec.manifest} at {revision} is not valid JSON: {exc}') from None
     if not isinstance(manifest, dict) or manifest.get('format') != FORMAT or manifest.get('component') != spec.name:
         raise Broken(f'{spec.manifest} at {revision} is not a format-{FORMAT} {spec.name} manifest')
+    kind = project_kind(spec, revision, values, manifest)
     substitutions = spec.substitutions(values)
     desired = Desired(revision, mode, link_source, shared)
     for skill in manifest.get('skills', []):
         name, source = skill.get('name'), relative_path(skill.get('source'), 'skill source')
         if not isinstance(name, str) or not SKILL_NAME.fullmatch(name):
             raise Broken(f'manifest: invalid skill name: {name!r}')
+        if 'kinds' in skill:
+            kinds = manifest_kinds(skill['kinds'], f'the kinds of the skill {name}')
+            if not kinds:
+                raise Broken(f'manifest: the skill {name} lists no kinds')
+            if kind is not None and kind not in kinds:
+                continue
         base = f'.agents/skills/{name}'
         entries = runtime.tree(revision, source)
         if not any(path == 'SKILL.md' for _, path, _ in entries):
