@@ -129,3 +129,41 @@ Not rerun
 : The behavioural scenarios, link mode and the worker smoke proof: only
   `LICENSE`, `NOTICE`, the README, `PROVENANCE.md` and the docs changed,
   and not the skill, the hook, the guards or the link code.
+
+## 2026-10-03: project kinds in the shared module
+
+Candidates
+: agent-board `3b2ba94`, this commit's parent: `src/project_files.py`
+  asks the spec's optional `kind(values)` hook and selects skills by the
+  manifest's `kinds`, and the shared rules gain "Project kinds".
+  `BoardSpec` has no hook, so the board installs exactly what it did.
+: isabelle-formal-modeling-tooling `abd12cd`, which uses the hook for its
+  new theory projects; see that repository's `docs/validation.md`. The
+  fixtures ran at `dcb7809`, which differs from it only in its plan's
+  History.
+
+Hosts
+: Claude Code 2.1.289 with claude-opus-5-5, in auto permission mode, and
+  Codex CLI 0.160.0 with gpt-6-astra at medium reasoning effort, in the
+  workspace-write sandbox with automatic review, for the tooling's theory
+  host fixture; no board session ran.
+: Isabelle2025-2, Git 2.43, Python 3.12.3, on Linux.
+
+Setup
+: The tooling's fixture environment, with this checkout's executable in
+  `AGENT_BOARD_COMMAND` and on `PATH`.
+
+Passed
+: `make validate`, including the shared module's tests with a fake spec:
+  every skill without a kind, the selection with one, the refusal of a
+  kind the revision does not list, and malformed `kinds`.
+: The tooling's mechanical checks: 76 on the bare repository and 75 on
+  the stellar-core clone, all but the check of `init` at the previous
+  `stable`, whose doctors fail while the runtimes are at the candidates.
+: `src/project_files.py` is byte-identical to the tooling's
+  `scripts/project_files.py` at both candidates.
+
+Not rerun
+: The behavioural scenarios, link mode and the worker smoke proof: the
+  skill, the hook, the guards and the link code did not change, and
+  without a kind the shared module installs what it did.
