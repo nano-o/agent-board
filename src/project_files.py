@@ -124,10 +124,17 @@ class Runtime:
 # --- descriptors ---------------------------------------------------------------------
 
 def parse_key_values(text, rel):
-    """Data only: one key=value per line, # comment lines and blank lines allowed."""
+    """Data only: one key=value per line, # comment lines and blank lines allowed.
+
+    Lines end at LF alone and blank means spaces and tabs, as in a shell `read` loop; a carriage
+    return or a NUL byte is refused, since Python and the shell would read it differently."""
+    if '\0' in text:
+        raise Refused(f'{rel}: contains a NUL byte')
     values = {}
-    for number, line in enumerate(text.splitlines(), 1):
-        if not line.strip() or line.lstrip().startswith('#'):
+    for number, line in enumerate(text.split('\n'), 1):
+        if '\r' in line:
+            raise Refused(f'{rel}:{number}: carriage return (the descriptor must have LF line endings)')
+        if not line.strip(' \t') or line.lstrip(' \t').startswith('#'):
             continue
         if '=' not in line:
             raise Refused(f'{rel}:{number}: expected key=value, found: {line}')
@@ -142,11 +149,11 @@ def parse_key_values(text, rel):
 
 def set_key(text, key, value):
     """Change only KEY's line, keeping every other byte; append the line when absent."""
-    lines = text.splitlines(keepends=True)
+    lines = text.split('\n')
     for i, line in enumerate(lines):
-        if not line.lstrip().startswith('#') and line.split('=', 1)[0] == key and '=' in line:
-            lines[i] = f'{key}={value}' + line[len(line.rstrip('\r\n')):]
-            return ''.join(lines)
+        if not line.lstrip(' \t').startswith('#') and line.split('=', 1)[0] == key and '=' in line:
+            lines[i] = f'{key}={value}'
+            return '\n'.join(lines)
     if text and not text.endswith('\n'):
         text += '\n'
     return text + f'{key}={value}\n'

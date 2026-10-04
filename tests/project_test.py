@@ -315,6 +315,8 @@ class ProjectTests(unittest.TestCase):
         self.assertIn('full 40-hex commit', self.ab('sync', code=1).stderr)
         (self.project / 'agent-board.conf').write_text(f'format_version=1\nboard_revision={self.rev1}\nextra=1\n')
         self.assertIn('unknown key: extra', self.ab('sync', code=1).stderr)
+        (self.project / 'agent-board.conf').write_bytes(f'format_version=1\r\nboard_revision={self.rev1}\r\n'.encode())
+        self.assertIn('agent-board.conf:1: carriage return', self.ab('sync', code=1).stderr)
         (self.project / 'agent-board.conf').write_text(f'format_version=1\nboard_revision={self.rev1}\n')
         self.commit_all()
         self.assertIn('run `agent-board update REV`', self.ab('sync', code=1).stderr)
@@ -579,7 +581,7 @@ class ProjectTests(unittest.TestCase):
 class KindTests(unittest.TestCase):
     """The shared module's project kinds, through a fake spec on a scratch runtime.
 
-    agent-board's suite has the same tests; neither component names a kind
+    The Isabelle tooling's suite has the same tests; neither component names a kind
     in these manifests."""
 
     @classmethod
@@ -680,6 +682,37 @@ class KindTests(unittest.TestCase):
             for hook, values in ((True, {'kind': 'x'}), (True, {}), (False, {})):
                 with self.subTest(case=case, hook=hook, values=values), self.assertRaises(self.pf.Broken):
                     self.skills(revision, values, hook=hook)
+
+
+class KeyValueTests(unittest.TestCase):
+    """The shared descriptor format, read as a shell `read` loop reads it: lines end at LF alone.
+
+    The Isabelle tooling's suite has the same tests."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(MODULE_DIR))
+        sys.dont_write_bytecode = True
+        import project_files
+        cls.pf = project_files
+
+    def test_lines_end_at_lf_alone(self):
+        separators = '\v\f\x1c\x1d\x1e\x85\u2028\u2029'
+        self.assertEqual(self.pf.parse_key_values(f'# c\n\t# indented\n \t\na=1{separators}b=2\nc=3', 'x.conf'),
+                         {'a': f'1{separators}b=2', 'c': '3'})
+        for text, says in (('a=1\r\n', 'x.conf:1: carriage return (the descriptor must have LF line endings)'),
+                           ('a=1\nb=2\rc=3\n', 'x.conf:2: carriage return'),
+                           ('a=1\n# \0\n', 'x.conf: contains a NUL byte'),
+                           ('\f\n', 'x.conf:1: expected key=value'), ('\xa0\n', 'x.conf:1: expected key=value')):
+            with self.subTest(text=text), self.assertRaises(self.pf.Refused) as caught:
+                self.pf.parse_key_values(text, 'x.conf')
+            self.assertIn(says, str(caught.exception))
+
+    def test_set_key_changes_only_its_line(self):
+        text = 'a=1\x1cb=2\n# key=0\nkey=old\x85x\nz=9'
+        self.assertEqual(self.pf.set_key(text, 'key', 'new'), 'a=1\x1cb=2\n# key=0\nkey=new\nz=9')
+        self.assertEqual(self.pf.set_key(text, 'a', '5'), 'a=5\n# key=0\nkey=old\x85x\nz=9')
+        self.assertEqual(self.pf.set_key('a=1', 'b', '2'), 'a=1\nb=2\n')
 
 
 if __name__ == '__main__':

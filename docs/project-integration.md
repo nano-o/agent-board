@@ -36,11 +36,14 @@ format_version=1
 board_revision=<40-hex commit>
 ```
 
-Both are data only: one `key=value` per line, `#` comment lines and blank
-lines allowed, never sourced. The revision is always a full 40-hex commit,
-never a ref. `agent-board.conf` rejects unknown keys. A descriptor's
-presence is what "this project uses the component" means: nothing else,
-such as a board directory or a skill, turns a component on.
+Both are data only: UTF-8, one `key=value` per line, `#` comment lines and
+blank lines allowed, never sourced. Lines end at LF alone, blank means
+spaces and tabs, and a carriage return or NUL byte is refused, so every
+parser of a descriptor, in Python or the shell, reads the same keys and
+values. The revision is always a full 40-hex commit, never a ref.
+`agent-board.conf` rejects unknown keys. A descriptor's presence is what
+"this project uses the component" means: nothing else, such as a board
+directory or a skill, turns a component on.
 
 **Inventory.** `.isabelle-tooling/inventory.json` and
 `.agent-board/inventory.json`, written with `json.dumps(indent=2,
