@@ -167,3 +167,38 @@ Not rerun
 : The behavioural scenarios, link mode and the worker smoke proof: the
   skill, the hook, the guards and the link code did not change, and
   without a kind the shared module installs what it did.
+
+## 2026-10-04: descriptors read the same in Python and the shell
+
+Candidates
+: agent-board `8378248`, this commit's parent: `parse_key_values` splits
+  lines at LF alone, takes only spaces and tabs as blank, and refuses a
+  carriage return or a NUL byte, and `set_key` splits the same way, so the
+  Isabelle tooling's shell parser and the shared module read a descriptor
+  alike. A CRLF `agent-board.conf`, which used to read as LF, is refused.
+: isabelle-formal-modeling-tooling `6dc3820`, whose shell parser reads
+  descriptors the same way; see that repository's `docs/validation.md`.
+  The fixtures ran at `84f0ffc`, which differs from it only in its plan's
+  History.
+
+Hosts
+: None: no host session ran, because nothing a host loads changed.
+: Isabelle2025-2, Git 2.43, Python 3.12.3, on Linux.
+
+Setup
+: The tooling's fixture environment, with this checkout's executable in
+  `AGENT_BOARD_COMMAND` and on `PATH`.
+
+Passed
+: `make validate`, including the shared parser's tests (line ends,
+  blank lines, carriage returns, NUL bytes, and `set_key` around other
+  separators) and a CRLF `agent-board.conf` refused by `sync`.
+: The tooling's mechanical checks: 76 on the bare repository and 75 on
+  the stellar-core clone, all but the check of `init` at the previous
+  `stable`, whose doctors fail while the runtimes are at the candidates.
+: `src/project_files.py` is byte-identical to the tooling's
+  `scripts/project_files.py` at both candidates.
+
+Not rerun
+: The behavioural scenarios, link mode and the worker smoke proof: the
+  skill, the guards and the link code did not change.
